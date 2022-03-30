@@ -1,28 +1,18 @@
+from email import message
 import math
 import os
 from unicodedata import decimal
 import pyvisa
 from enum import Enum
 
-class DS1000z:
-    def __init__(self, resource):
+
+class _Scpihelper():
+    def __init__(self, resource, message_prefix: str = ""):
         self.resource = resource
-
-        self.channel = [
-            _Channel(self, 1),
-            _Channel(self, 2),
-            _Channel(self, 3),
-            _Channel(self, 4),
-        ]
-        self.cursor = _Cursor(self)
-        self.display = _Display(self)
-        self.measure = _Measure(self)
-        self.timebase = _Timebase(self)
-        self.trigger = _Trigger(self)
-        self.waveform = _Waveform(self)
-
+        self.message_prefix = message_prefix
+    
     def _write(self, message: str) -> int:
-        return self.resource.write(message)
+        return self.resource.write("%s%s" % (self.message_prefix, message))
     
     def _read(self, strip: bool = True) -> str:
         answer = self.resource.read()
@@ -31,13 +21,13 @@ class DS1000z:
         return answer
 
     def _query(self, message: str, strip: bool = True) -> str:
-        answer = self.resource.query(message)
+        answer = self.resource.query("%s%s" % (self.message_prefix, message))
         if strip is True:
             answer = answer.strip()
         return answer
     
     def _querybool(self, message: str) -> bool:
-        answer = self.resource.query(message).strip().upper()
+        answer = self.resource.query("%s%s" % (self.message_prefix, message)).strip().upper()
         if answer in ("1", "ON"):
             return True
         elif answer in ("0", "OFF"):
@@ -46,7 +36,7 @@ class DS1000z:
             raise Exception("unexpected answer '%s'" % (answer))
 
     def _querynumber(self, message: str):
-        answer = self.resource.query(message).strip().upper()
+        answer = self.resource.query("%s%s" % (self.message_prefix, message)).strip().upper()
         if answer == "9.91E37":
             return math.nan
         elif answer == "9.9E37":
@@ -71,6 +61,25 @@ class DS1000z:
             return float(answer)
         else:
             return answer
+
+
+class DS1000z(_Scpihelper):
+    def __init__(self, resource):
+        #self.resource = resource
+        super().__init__(resource)
+
+        self.channel = [
+            _Channel(self, 1),
+            _Channel(self, 2),
+            _Channel(self, 3),
+            _Channel(self, 4),
+        ]
+        self.cursor = _Cursor(self)
+        self.display = _Display(self)
+        self.measure = _Measure(self)
+        self.timebase = _Timebase(self)
+        self.trigger = _Trigger(self)
+        self.waveform = _Waveform(self)
 
     def autoscale(self):
         """Enable the waveform auto setting function. 
@@ -196,27 +205,12 @@ class VerticalUnit(Enum):
     Ampere = "AMP"
     Unknown = "UNKN"
 
-class _Channel():
+class _Channel(_Scpihelper):
     def __init__(self, scope: DS1000z, channel: int):
         assert channel > 0 and channel < 5
+        super().__init__(scope.resource, ":CHAN%u" % (channel))
         self.scope = scope
         self.channel = channel
-        self.message_prefix = ":CHAN%u" % (channel)
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
 
     @property
     def bandwidth_limit(self) -> BandwidthLimit:
@@ -347,27 +341,14 @@ class CursorMode(Enum):
     Auto = "AUTO"
     XY = "XY"
 
-class _Cursor():
+class _Cursor(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":CURS"
+        super().__init__(scope.resource, ":CURS")
 
         self.manual = _Cursor_Manual(scope)
         self.track = _Cursor_Track(scope)
         #self.auto = _Cursor_Auto(scope)
-
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
 
     @property
     def mode(self) -> CursorMode:
@@ -400,28 +381,10 @@ class CursorManualVerticalUnit(Enum):
     Percent = "PER"
     Source = "SOUR"
 
-class _Cursor_Manual():
+class _Cursor_Manual(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":CURS:MAN"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":CURS:MAN")
 
     @property
     def type(self) -> CursorManualType:
@@ -577,28 +540,10 @@ class DisplayGrid(Enum):
     Half = "GALF"
     Off = "NONE"
 
-class _Cursor_Track():
+class _Cursor_Track(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":CURS:TRAC"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":CURS:TRAC")
 
     @property
     def source1(self) -> CursorTrackSource:
@@ -721,26 +666,10 @@ class DisplayDataFormat(Enum):
     TIFF = "TIFF"
 
 
-class _Display():
+class _Display(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":DISP"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
+        super().__init__(scope.resource, ":DISP")
 
     def clear(self):
         """Clear all the waveforms on the screen."""
@@ -940,26 +869,10 @@ class MeasureStatisticType(Enum):
     Average = "AVER"
     Deviation = "DEV"
 
-class _Measure():
+class _Measure(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":MEAS"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
+        super().__init__(scope.resource, ":MEAS")
 
     @property
     def source(self) -> MeasureSource:
@@ -1103,7 +1016,7 @@ class _Measure():
         if source2 is not None:
             message += ",%s" % (source2.value)
 
-        self._write(message)
+        return self._queryfloat(message)
 
     def item_add(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
         """Measure any waveform parameter of the specified source"""
@@ -1122,16 +1035,19 @@ class _Measure():
     def item_read(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
         """Query the measurement result of any waveform parameter of the specified source"""
         assert not (source1 is None and source2 is not None)
-        assert item in (MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
-            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase) and source2 is not None
+        dualsource_measurements = (
+            MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
+            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase)
+        assert item not in dualsource_measurements or (item in dualsource_measurements and source2 is not None)
 
-        message = ":ITEM? %s,%s" % (type.value, item.value)
+        message = ":ITEM? %s" % (item.value)
         if source1 is not None:
             message += ",%s" % (source1.value)
         if source2 is not None:
             message += ",%s" % (source2.value)
 
-        self._write(message)
+        return self._queryfloat(message)
+
 
 #TODO: Reference
 #TODO: Source
@@ -1144,28 +1060,10 @@ class TimebaseMode(Enum):
     XY = "XY"
     Roll = "ROLL"
 
-class _Timebase():
+class _Timebase(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":TIM"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":TIM")
 
     @property
     def delay_enable(self) -> bool:
@@ -1260,30 +1158,12 @@ class TriggerSweep(Enum):
     Normal = "NORM"
     SingleShot = "SING"
 
-class _Trigger():
+class _Trigger(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":TRIG"
+        super().__init__(scope.resource, ":TRIG")
 
         self.edge = _Trigger_Edge(scope)
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
 
     @property
     def mode(self) -> TriggerMode:
@@ -1376,28 +1256,10 @@ class TriggerEdgeSlope(Enum):
     Fall = "NEG"
     Both = "RFAL"
 
-class _Trigger_Edge():
+class _Trigger_Edge(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":TRIG:EDG"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":TRIG:EDG")
 
     @property
     def source(self) -> TriggerEdgeSource:
@@ -1507,28 +1369,10 @@ class WaveformPreamble():
         self.yreference = float(preambledata[9])
 
 
-class _Waveform():
+class _Waveform(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":WAV"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":WAV")
 
     @property
     def source(self) -> WaveformSource:
@@ -1742,28 +1586,10 @@ class WaveformData():
 
 
 ### Templates
-class _Template():
+class _Template(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        self.message_prefix = ":TEMPLATE"
-    
-    def _write(self, message: str) -> int:
-        return self.scope._write("%s%s" % (self.message_prefix, message))
-    
-    def _read(self, strip: bool = True) -> str:
-        return self.scope._read(strip)
-
-    def _query(self, message: str, strip: bool = True) -> str:
-        return self.scope._query("%s%s" % (self.message_prefix, message), strip)
-    
-    def _querybool(self, message: str) -> bool:
-        return self.scope._querybool("%s%s" % (self.message_prefix, message))
-
-    def _queryint(self, message: str) -> int:
-        return self.scope._queryint("%s%s" % (self.message_prefix, message))
-
-    def _queryfloat(self, message: str) -> float:
-        return self.scope._queryfloat("%s%s" % (self.message_prefix, message))
+        super().__init__(scope.resource, ":TEMPLATE")
 
     @property
     def prop_bool(self) -> bool:
@@ -1810,4 +1636,4 @@ if __name__ == "__main__":
     res = rm.open_resource('USB0::0x1AB1::0x04CE::DS1ZA171104975::INSTR')
     dso = DS1000z(res)
     data = dso.waveform.get_data(WaveformSource.Channel1, start = 1)
-    data.save_csv("D:/waveform1.csv")
+    data.save_csv("waveform2.csv", decimalpoint=",")
