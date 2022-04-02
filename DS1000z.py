@@ -1,14 +1,12 @@
-from email import message
 import math
 import os
-from unicodedata import decimal
 import pyvisa
 from enum import Enum
 
-
 class _Scpihelper():
-    def __init__(self, resource, message_prefix: str = ""):
-        self.resource = resource
+    def __init__(self, scope, message_prefix: str = ""):
+        self.scope = scope
+        self.resource = scope.resource
         self.message_prefix = message_prefix
     
     def _write(self, message: str) -> int:
@@ -26,7 +24,10 @@ class _Scpihelper():
             answer = answer.strip()
         return answer
     
-    def _querybool(self, message: str) -> bool:
+    def _write_bool(self, message: str, value: bool):
+        self.resource.write("%s%s %u" % (self.message_prefix, message, (1 if value else 0)))
+
+    def _query_bool(self, message: str) -> bool:
         answer = self.resource.query("%s%s" % (self.message_prefix, message)).strip().upper()
         if answer in ("1", "ON"):
             return True
@@ -35,7 +36,7 @@ class _Scpihelper():
         else:
             raise Exception("unexpected answer '%s'" % (answer))
 
-    def _querynumber(self, message: str):
+    def _query_number(self, message: str):
         answer = self.resource.query("%s%s" % (self.message_prefix, message)).strip().upper()
         if answer == "9.91E37":
             return math.nan
@@ -48,35 +49,63 @@ class _Scpihelper():
         
         return answer
 
-    def _queryint(self, message: str) -> int:
-        answer = self._querynumber(message)
+    def _write_int(self, message: str, value : int):
+        self.resource.write("%s%s %u" % (self.message_prefix, message, value))
+
+    def _query_int(self, message: str) -> int:
+        answer = self._query_number(message)
         if isinstance(answer, str):
             return int(answer)
         else:
             return answer
 
-    def _queryfloat(self, message: str) -> float:
-        answer = self._querynumber(message)
+    def _write_float(self, message: str, value: float):
+        self.resource.write("%s%s %.4e" % (self.message_prefix, message, value))
+
+    def _query_float(self, message: str) -> float:
+        answer = self._query_number(message)
         if isinstance(answer, str):
             return float(answer)
         else:
             return answer
 
+class _Channels():
+    def __init__(self, scope) -> None:
+        self.scope = scope
+
+        self._items = [_Channel(scope, i) for i in range(1, 5)]
+
+    def __getitem__(self, i):
+        assert i >= 1 and i <= 4
+        return self._items[i - 1]
+
+class _Decoders():
+    def __init__(self, scope) -> None:
+        self.scope = scope
+
+        self._items = [
+            _Decoder(scope, 1),
+            _Decoder(scope, 2),
+        ]
+    
+    def __getitem__(self, i):
+        assert i >= 1 and i <= 2
+        return self._items[i - 1]
 
 class DS1000z(_Scpihelper):
     def __init__(self, resource):
-        #self.resource = resource
-        super().__init__(resource)
+        self.resource = resource
+        super().__init__(self)
 
-        self.channel = [
-            _Channel(self, 1),
-            _Channel(self, 2),
-            _Channel(self, 3),
-            _Channel(self, 4),
-        ]
+        self.channel = _Channels(self)
+        self.acquire = _Acquire(self)
+        self.calibrate = _Calibrate(self)
         self.cursor = _Cursor(self)
+        self.decoder = _Decoders(self)
         self.display = _Display(self)
+        self.math = _Math(self)
         self.measure = _Measure(self)
+        self.reference = _References(self)
         self.timebase = _Timebase(self)
         self.trigger = _Trigger(self)
         self.waveform = _Waveform(self)
@@ -133,7 +162,7 @@ class DS1000z(_Scpihelper):
     @property
     def events_status(self) -> int:
         """Set or query the enable register for the standard event status register set."""
-        return self._queryint("*ESE?")
+        return self._query_int("*ESE?")
 
     @events_status.setter
     def events_status(self, value: int):
@@ -143,7 +172,7 @@ class DS1000z(_Scpihelper):
     @property
     def events_query_clear(self) -> int:
         """Query and clear the event register for the standard event status register."""
-        return self._queryint("*ESR?")
+        return self._query_int("*ESR?")
 
     @property
     def id(self) -> str:
@@ -153,7 +182,7 @@ class DS1000z(_Scpihelper):
     @property
     def operation_finished(self) -> bool:
         """The command is used to query whether the current operation is finished. """
-        return self._querybool("*OPC?")
+        return self._query_bool("*OPC?")
     
     def set_operation_finished(self):
         """The command is used to set the Operation Complete bit (bit 0) in the standard 
@@ -167,7 +196,7 @@ class DS1000z(_Scpihelper):
     @property
     def status_byte(self) -> int:
         """Set or query the enable register for the status byte register set."""
-        return self._queryint("*SRE?")
+        return self._query_int("*SRE?")
 
     @status_byte.setter
     def status_byte(self, value: int):
@@ -178,17 +207,74 @@ class DS1000z(_Scpihelper):
     def status_events(self) -> int:
         """Query the event register for the status byte register. 
         The value of the status byte register is set to 0 after this command is executed."""
-        return self._queryint("*STB?")
+        return self._query_int("*STB?")
     
     def selftest(self) -> int:
         """Perform a self-test and then return the seilf-test results."""
-        return self._queryint("*TST?")
+        return self._query_int("*TST?")
 
     def wait(self):
         """Wait for the operation to finish."""
         self._write("*WAI")
 
-#TODO: Acquire
+class AcquireMode(Enum):
+    Normal = "NORM"
+    Average = "AVER"
+    Peak = "PEAK"
+    HighResolution = "HRES"
+
+class _Acquire(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":ACQ")
+
+    @property
+    def averages(self) -> int:
+        """Set or query the number of averages under the average acquisition mode.
+        The value must be a power of 2 between 2 and 1024"""
+        return self._query_int(":AVER?")
+
+    @averages.setter
+    def averages(self, value: int):
+        assert value in (2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+        self._write(":AVER %u" % (value))
+
+    @property
+    def memory_depth(self) -> int:
+        """Set or query the memory depth of the oscilloscope 
+        (namely the number of waveform points that can be stored in a single trigger sample). 
+        The default unit is pts (points)."""
+        return self._query_int(":MDEP?")
+
+    @memory_depth.setter
+    def memory_depth(self, value: int):
+        #FIXME: support Auto, restrict to values
+        self._write(":MDEP %u" % (value))
+
+    @property
+    def type(self) -> AcquireMode:
+        """Set or query the acquisition mode of the oscilloscope."""
+        return AcquireMode(self._query(":TYPE?"))
+
+    @type.setter
+    def type(self, value: AcquireMode):
+        self._write(":TYPE %s" % (value.value))
+
+    @property
+    def sampling_rate(self) -> int:
+        """Query the current sample rate. The default unit is Sa/s."""
+        return self._query_int(":RAT?")
+
+class _Calibrate(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":CAL")
+
+    def start(self):
+        """The oscilloscope starts to execute self-calibration."""
+        self._write(":STAR")
+
+    def quit(self):
+        """Exit the self-calibration at any time."""
+        self._write(":QUIT")
 
 class BandwidthLimit(Enum):
     Off = "OFF"
@@ -208,8 +294,7 @@ class VerticalUnit(Enum):
 class _Channel(_Scpihelper):
     def __init__(self, scope: DS1000z, channel: int):
         assert channel > 0 and channel < 5
-        super().__init__(scope.resource, ":CHAN%u" % (channel))
-        self.scope = scope
+        super().__init__(scope, ":CHAN%u" % (channel))
         self.channel = channel
 
     @property
@@ -234,21 +319,21 @@ class _Channel(_Scpihelper):
     def display(self) -> bool:
         """Enable or disable the specified channel or query the status 
         of the specified channel."""
-        return self._querybool(":DISP?")
+        return self._query_bool(":DISP?")
     
     @display.setter
     def display(self, value: bool):
-        self._write(":DISP %u" % (1 if value else 0))
+        self._write_bool(":DISP", value)
 
     @property
     def invert(self) -> bool:
         """Enable or disable the waveform invert of the specified channel or 
         query the status of the waveform invert of the specified channel."""
-        return self._querybool(":INV?")
+        return self._query_bool(":INV?")
     
     @invert.setter
     def invert(self, value: bool):
-        self._write(":INV %u" % (1 if value else 0))
+        self._write_bool(":INV", value)
 
     @property
     def offset(self) -> float:
@@ -260,67 +345,67 @@ class _Channel(_Scpihelper):
         probe ratio 10X & vertical scale >= 5   V/div: -1000 V ... +1000 V
         probe ratio 10X & vertical scale  < 5   V/div:   -20 V ...   +20 V
         """
-        return self._queryfloat(":OFFS?")
+        return self._query_float(":OFFS?")
 
     @offset.setter
     def offset(self, value: float):
         assert value >= -1000 and value <= 1000
-        self._write(":OFFS %.4e" % (value))
+        self._write_float(":OFFS", value)
 
     @property
     def range(self) -> float:
         """Set or query the vertical range of the specified channel. 
         The default unit is V."""
-        return self._queryfloat(":RANG?")
+        return self._query_float(":RANG?")
 
     @range.setter
     def range(self, value: float):
         assert value >= 8e-3 and value >= 800
-        self._write(":RANG %.4e" % (value))
+        self._write_float(":RANG", value)
 
     @property
     def delay_calibration(self) -> float:
         """Set or query the delay calibration time of the specified channel 
         to calibrate the zero offset of the corresponding channel. 
         The default unit is s."""
-        return self._queryfloat(":TCAL?")
+        return self._query_float(":TCAL?")
     
     @delay_calibration.setter
     def delay_calibration(self, value: float):
         assert value > 100e-12
-        self._write(":TCAL %.4e" % (value))
+        self._write_float(":TCAL", value)
     
     @property
     def scale(self) -> float:
         """Set or query the vertical scale of the specified channel.
         The default unit is V.
         if vernier function is disabled, the scale is in 1-2-5 step"""
-        return self._queryfloat(":SCAL?")
+        return self._query_float(":SCAL?")
 
     @scale.setter
     def scale(self, value: float):
         assert value >= 1e-3 and value <= 100
-        self._write(":SCAL %.4e" % (value))
+        self._write_float(":SCAL", value)
 
     @property
     def probe(self) -> float:
         """Set or query the probe ratio of the specified channel.
         must be in discrete steps"""
-        return self._queryfloat(":PROB?")
+        return self._query_float(":PROB?")
 
     @probe.setter
     def probe(self, value: float):
         assert value in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
             1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
-        self._write(":PROB %.4e" % (value))
+        self._write_float(":PROB", value)
 
     @property
     def vertical_unit(self) -> VerticalUnit:
         """Set or query the amplitude display unit of the specified channel."""
-        return Coupling(self._query(":UNIT?"))
+        return VerticalUnit(self._query(":UNIT?"))
 
     @vertical_unit.setter
-    def vertical_unit(self, value: Coupling):
+    def vertical_unit(self, value: VerticalUnit):
         self._write(":UNIT %s" % (value.value))
 
     @property
@@ -328,11 +413,11 @@ class _Channel(_Scpihelper):
         """Enable or disable the fine adjustment of the vertical scale 
         of the specified channel, or query the fine adjustment status 
         of the vertical scale of the specified channel."""
-        return self._querybool(":VERN?")
+        return self._query_bool(":VERN?")
     
     @vernier.setter
     def vernier(self, value: bool):
-        self._write(":VERN %u" % (1 if value else 0))
+        self._write_bool(":VERN", value)
 
 class CursorMode(Enum):
     Off = "OFF"
@@ -343,12 +428,12 @@ class CursorMode(Enum):
 
 class _Cursor(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":CURS")
+        super().__init__(scope, ":CURS")
 
-        self.manual = _Cursor_Manual(scope)
-        self.track = _Cursor_Track(scope)
-        #self.auto = _Cursor_Auto(scope)
+        self.manual = _CursorManual(scope)
+        self.track = _CursorTrack(scope)
+        self.auto = _CursorAuto(scope)
+        self.xy = _CursorXY(scope)
 
     @property
     def mode(self) -> CursorMode:
@@ -381,10 +466,9 @@ class CursorManualVerticalUnit(Enum):
     Percent = "PER"
     Source = "SOUR"
 
-class _Cursor_Manual(_Scpihelper):
+class _CursorManual(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":CURS:MAN")
+        super().__init__(scope, ":CURS:MAN")
 
     @property
     def type(self) -> CursorManualType:
@@ -426,7 +510,7 @@ class _Cursor_Manual(_Scpihelper):
     def ax(self) -> int:
         """Set or query the horizontal position of cursor A 
         in the manual cursor measurement mode."""
-        return self._queryint(":AX?")
+        return self._query_int(":AX?")
 
     @ax.setter
     def ax(self, value: int):
@@ -437,7 +521,7 @@ class _Cursor_Manual(_Scpihelper):
     def bx(self) -> int:
         """Set or query the horizontal position of cursor B 
         in the manual cursor measurement mode."""
-        return self._queryint(":BX?")
+        return self._query_int(":BX?")
 
     @bx.setter
     def bx(self, value: int):
@@ -448,7 +532,7 @@ class _Cursor_Manual(_Scpihelper):
     def ay(self) -> int:
         """Set or query the vertical position of cursor A 
         in the manual cursor measurement mode."""
-        return self._queryint(":AY?")
+        return self._query_int(":AY?")
 
     @ay.setter
     def ay(self, value: int):
@@ -459,7 +543,7 @@ class _Cursor_Manual(_Scpihelper):
     def by(self) -> int:
         """Set or query the vertical position of cursor B 
         in the manual cursor measurement mode."""
-        return self._queryint(":BY?")
+        return self._query_int(":BY?")
 
     @by.setter
     def by(self, value: int):
@@ -470,32 +554,32 @@ class _Cursor_Manual(_Scpihelper):
     def ax_value(self) -> float:
         """Query the X value of cursor A in the manual cursor measurement mode.
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":AXV?")
+        return self._query_float(":AXV?")
 
     @property
     def ay_value(self) -> float:
         """Query the Y value of cursor A in the manual cursor measurement mode.
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":AYV?")
+        return self._query_float(":AYV?")
 
     @property
     def bx_value(self) -> float:
         """Query the X value of cursor B in the manual cursor measurement mode.
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":BXV?")
+        return self._query_float(":BXV?")
 
     @property
     def by_value(self) -> float:
         """Query the Y value of cursor B in the manual cursor measurement mode.
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":BYV?")
+        return self._query_float(":BYV?")
 
     @property
     def x_delta(self) -> float:
         """Query the difference between the X values of cursor A and cursor B (BX-AX)
         in the manual cursor measurement mode. 
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":XDEL?")
+        return self._query_float(":XDEL?")
 
     @property
     def x_delta_inverse(self) -> float:
@@ -503,14 +587,14 @@ class _Cursor_Manual(_Scpihelper):
         between the X values of cursor A and cursor B (1/|dX|) 
         in the manual cursor measurement mode. The unit depends on the 
         horizontal unit currently selected."""
-        return self._queryfloat(":IXDEL?")
+        return self._query_float(":IXDEL?")
 
     @property
     def y_delta(self) -> float:
         """Query the difference between the Y values of cursor A and cursor B (BY-AY)
         in the manual cursor measurement mode. 
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":YDEL?")
+        return self._query_float(":YDEL?")
 
 
 class CursorTrackSource(Enum):
@@ -521,29 +605,9 @@ class CursorTrackSource(Enum):
     Channel4 = "CHAN4"
     Math = "MATH"
 
-class DisplayType(Enum):
-    Vectors = "VECT"
-    Dots = "DOTS"
-
-class DisplayPersistence(Enum):
-    Minimum = "MIN"
-    Time_100ms = "0.1"
-    Time_200ms = "0.2"
-    Time_500ms = "0.5"
-    Time_1s = "1"
-    Time_5s = "5"
-    Time_10s = "10"
-    Infinite = "INF"
-
-class DisplayGrid(Enum):
-    Full = "FULL"
-    Half = "GALF"
-    Off = "NONE"
-
-class _Cursor_Track(_Scpihelper):
+class _CursorTrack(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":CURS:TRAC")
+        super().__init__(scope, ":CURS:TRAC")
 
     @property
     def source1(self) -> CursorTrackSource:
@@ -567,7 +631,7 @@ class _Cursor_Track(_Scpihelper):
     def ax(self) -> int:
         """Set or query the horizontal position of cursor A 
         in the track cursor measurement mode."""
-        return self._queryint(":AX?")
+        return self._query_int(":AX?")
 
     @ax.setter
     def ax(self, value: int):
@@ -578,7 +642,7 @@ class _Cursor_Track(_Scpihelper):
     def bx(self) -> int:
         """Set or query the horizontal position of cursor B 
         in the track cursor measurement mode."""
-        return self._queryint(":BX?")
+        return self._query_int(":BX?")
 
     @bx.setter
     def bx(self, value: int):
@@ -589,7 +653,7 @@ class _Cursor_Track(_Scpihelper):
     def ay(self) -> int:
         """Set or query the vertical position of cursor A 
         in the track cursor measurement mode."""
-        return self._queryint(":AY?")
+        return self._query_int(":AY?")
 
     @ay.setter
     def ay(self, value: int):
@@ -600,7 +664,7 @@ class _Cursor_Track(_Scpihelper):
     def by(self) -> int:
         """Set or query the vertical position of cursor B 
         in the track cursor measurement mode."""
-        return self._queryint(":BY?")
+        return self._query_int(":BY?")
 
     @by.setter
     def by(self, value: int):
@@ -611,32 +675,32 @@ class _Cursor_Track(_Scpihelper):
     def ax_value(self) -> float:
         """Query the X value of cursor A in the track cursor measurement mode.
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":AXV?")
+        return self._query_float(":AXV?")
 
     @property
     def ay_value(self) -> float:
         """Query the Y value of cursor A in the track cursor measurement mode.
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":AYV?")
+        return self._query_float(":AYV?")
 
     @property
     def bx_value(self) -> float:
         """Query the X value of cursor B in the track cursor measurement mode.
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":BXV?")
+        return self._query_float(":BXV?")
 
     @property
     def by_value(self) -> float:
         """Query the Y value of cursor B in the track cursor measurement mode.
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":BYV?")
+        return self._query_float(":BYV?")
 
     @property
     def x_delta(self) -> float:
         """Query the difference between the X values of cursor A and cursor B (BX-AX)
         in the track cursor measurement mode. 
         The unit depends on the horizontal unit currently selected."""
-        return self._queryfloat(":XDEL?")
+        return self._query_float(":XDEL?")
 
     @property
     def x_delta_inverse(self) -> float:
@@ -644,19 +708,778 @@ class _Cursor_Track(_Scpihelper):
         between the X values of cursor A and cursor B (1/|dX|) 
         in the track cursor measurement mode. The unit depends on the 
         horizontal unit currently selected."""
-        return self._queryfloat(":IXDEL?")
+        return self._query_float(":IXDEL?")
 
     @property
     def y_delta(self) -> float:
         """Query the difference between the Y values of cursor A and cursor B (BY-AY)
         in the track cursor measurement mode. 
         The unit depends on the vertical unit currently selected."""
-        return self._queryfloat(":YDEL?")
+        return self._query_float(":YDEL?")
 
-#TODO: _Cursor_Auto
-#TODO: _Cursor_XY
+class CursorItem(Enum):
+    Off = "OFF"
+    Item1 = "ITEM1"
+    Item2 = "ITEM2"
+    Item3 = "ITEM3"
+    Item4 = "ITEM4"
 
-#TODO: _Decoder
+class _CursorAuto(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":CURS:AUTO")
+    
+    @property
+    def item(self) -> CursorItem:
+        """Select the parameters to be measured by the auto cursor 
+        from the five parameters enabled last or query the parameters currently measured by the auto cursor."""
+        return CursorItem(self._query(":ITEM?"))
+
+    @item.setter
+    def item(self, value: CursorItem):
+        self._write(":ITEM %s" % (value.value))
+
+    @property
+    def ax(self) -> int:
+        """Query the horizontal position of cursor A in auto cursor measurement."""
+        return self._query_int(":AX?")
+
+    @property
+    def bx(self) -> int:
+        """Query the horizontal position of cursor B in auto cursor measurement."""
+        return self._query_int(":BX?")
+
+    @property
+    def ay(self) -> int:
+        """Query the vertical position of cursor A in auto cursor measurement."""
+        return self._query_int(":AY?")
+
+    @property
+    def by(self) -> int:
+        """Query the vertical position of cursor B in auto cursor measurement."""
+        return self._query_int(":BY?")
+
+    @property
+    def ax_value(self) -> float:
+        """Query the X value of cursor A in auto cursor measurement.
+        The unit depends on the horizontal unit currently selected."""
+        return self._query_float(":AXV?")
+
+    @property
+    def ay_value(self) -> float:
+        """Query the Y value of cursor A in auto cursor measurement. 
+        The unit depends on the vertical unit currently selected."""
+        return self._query_float(":AYV?")
+
+    @property
+    def bx_value(self) -> float:
+        """Query the X value of cursor B in auto cursor measurement.
+        The unit depends on the horizontal unit currently selected."""
+        return self._query_float(":BXV?")
+
+    @property
+    def by_value(self) -> float:
+        """Query the Y value of cursor B in auto cursor measurement. 
+        The unit depends on the vertical unit currently selected."""
+        return self._query_float(":BYV?")
+
+class _CursorXY(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":CURS:XY")
+
+    @property
+    def ax(self) -> int:
+        """Query the horizontal position of cursor A in auto cursor measurement."""
+        return self._query_int(":AX?")
+
+    @ax.setter
+    def ax(self, value: int):
+        #assert value >= 5 and value <= 394
+        self._write(":AX %u" % (value))
+
+    @property
+    def bx(self) -> int:
+        """Query the horizontal position of cursor B in auto cursor measurement."""
+        return self._query_int(":BX?")
+
+    @bx.setter
+    def bx(self, value: int):
+        #assert value >= 5 and value <= 394
+        self._write(":BX %u" % (value))
+
+    @property
+    def ay(self) -> int:
+        """Query the vertical position of cursor A in auto cursor measurement."""
+        return self._query_int(":AY?")
+
+    @ay.setter
+    def ay(self, value: int):
+        #assert value >= 5 and value <= 394
+        self._write(":AY %u" % (value))
+
+    @property
+    def by(self) -> int:
+        """Query the vertical position of cursor B in auto cursor measurement."""
+        return self._query_int(":BY?")
+
+    @by.setter
+    def by(self, value: int):
+        #assert value >= 5 and value <= 394
+        self._write(":BY %u" % (value))
+
+    @property
+    def ax_value(self) -> float:
+        """Query the X value of cursor A in XY cursor measurement.
+        The unit depends on the horizontal unit currently selected."""
+        return self._query_float(":AXV?")
+
+    @property
+    def ay_value(self) -> float:
+        """Query the Y value of cursor A in XY cursor measurement. 
+        The unit depends on the vertical unit currently selected."""
+        return self._query_float(":AYV?")
+
+    @property
+    def bx_value(self) -> float:
+        """Query the X value of cursor B in XY cursor measurement.
+        The unit depends on the horizontal unit currently selected."""
+        return self._query_float(":BXV?")
+
+    @property
+    def by_value(self) -> float:
+        """Query the Y value of cursor B in XY cursor measurement. 
+        The unit depends on the vertical unit currently selected."""
+        return self._query_float(":BYV?")
+
+class DecoderMode(Enum):
+    Parallel = "PAR"
+    UART = "UART"
+    SPI = "SPI"
+    IIC = "IIC"
+
+class DecoderFormat(Enum):
+    Hexadecimal = "HEX"
+    ASCII = "ASC"
+    Decimal = "DEC"
+    Binary = "BIN"
+    Line = "LINE"
+
+class _Decoder(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        self.index = index
+        super().__init__(scope, ":DEC%u" % (index))
+
+        self.threshold = _DecoderThreshold(scope, self.index)
+        self.config = _DecoderConfig(scope, index)
+
+        self.uart = _DecoderUart(scope, index)
+        self.iic = _DecoderIic(scope, index)
+        self.spi = _DecoderSpi(scope, index)
+        self.parallel = _DecoderParallel(scope, index)
+
+        self.event_table = _EventTable(scope, index)
+
+    @property
+    def mode(self) -> DecoderMode:
+        """Set or query the decoder type."""
+        return DecoderMode(self._query(":MODE?"))
+
+    @mode.setter
+    def mode(self, value: DecoderMode):
+        self._write(":MODE %s" % (value.value))
+
+    @property
+    def display(self) -> bool:
+        """Turn on or off the decoder or query the status of the decoder."""
+        return self._query_bool(":DISP?")
+    
+    @display.setter
+    def display(self, value: bool):
+        self._write_bool(":DISP", value)
+
+    @property
+    def format(self) -> DecoderFormat:
+        """Set or query the bus display format."""
+        return DecoderFormat(self._query(":FORM?"))
+
+    @format.setter
+    def format(self, value: DecoderFormat):
+        self._write(":FORM %s" % (value.value))
+
+    @property
+    def position(self) -> int:
+        """Set or query the vertical position of the bus on the screen."""
+        return self._query_int(":POS?")
+
+    @position.setter
+    def position(self, value: int):
+        assert value >= 50 and value <= 350
+        self._write_int(":POS", value)
+    
+class _DecoderThreshold(_Scpihelper):
+    """Set or query the threshold level of the specified analog channel."""
+
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:THRE" % (index))
+
+    def __getitem__(self, key):
+        #FIXME: is it better to have the index 1...4 or 0...3?
+        assert key >= 1 and key <= 4
+        self._query_float(":CHAN%u?" % (key))
+
+    def __setitem__(self, key, value):
+        assert key >= 1 and key <= 4
+        self._write_float(":CHAN%u" % (key), value)
+    
+    @property
+    def auto(self) -> bool:
+        """Turn on or off the auto threshold function of the analog channels, 
+        or query the status of the auto threshold function of the analog channels."""
+        return self._query_bool(":AUTO?")
+    
+    @auto.setter
+    def auto(self, value: bool):
+        self._write_bool(":AUTO", value)
+
+class _DecoderConfig(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:CONF" % (index))
+
+    @property
+    def label(self) -> bool:
+        """Turn on or off the label display function, or query the status of the label display function."""
+        return self._query_bool(":LAB?")
+    
+    @label.setter
+    def label(self, value: bool):
+        self._write_bool(":LAB", value)
+
+    @property
+    def line(self) -> bool:
+        """Turn on or off the bus display function, or query the status of the bus display function."""
+        return self._query_bool(":LINE?")
+    
+    @line.setter
+    def line(self, value: bool):
+        self._write_bool(":LINE", value)
+
+    @property
+    def format(self) -> bool:
+        """Turn on or off the format display function, or query the status of the format display function."""
+        return self._query_bool(":FORM?")
+    
+    @format.setter
+    def format(self, value: bool):
+        self._write_bool(":FORM", value)
+
+    @property
+    def endian(self) -> bool:
+        """Turn on or off the endian display function in serial bus decoding, or query the status of the endian 
+        display function in serial bus decoding."""
+        return self._query_bool(":END?")
+    
+    @endian.setter
+    def endian(self, value: bool):
+        self._write_bool(":END", value)
+
+    @property
+    def width(self) -> bool:
+        """Turn on or off the width display function, or query the status of the width display function."""
+        return self._query_bool(":WID?")
+    
+    @width.setter
+    def width(self, value: bool):
+        self._write_bool(":WID", value)
+
+    @property
+    def sample_rate(self) -> bool:
+        """Query the current digital sample rate."""
+        return self._query_bool(":SRAT?")
+
+
+class DecoderUartSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+    Off = "OFF"
+
+class DecoderUartPolarity(Enum):
+    Negative = "NEG"
+    Positive = "POS"
+
+class DecoderUartEndian(Enum):
+    LSB = "LSB"
+    MSB = "MSB"
+
+class DecoderUartStopbits(Enum):
+    One = "1"
+    OnePointFive = "1.5"
+    Two = "2"
+
+class DecoderUartParity(Enum):
+    No = "NONE"
+    Even = "EVEN"
+    Odd = "OFF"
+
+class _DecoderUart(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:UART" % (index))
+
+    @property
+    def tx(self) -> DecoderUartSource:
+        """Set or query the TX channel source of RS232 decoding."""
+        return DecoderUartSource(self._query(":TX?"))
+
+    @tx.setter
+    def tx(self, value: DecoderUartSource):
+        self._write(":TX %s" % (value.value))
+
+    @property
+    def rx(self) -> DecoderUartSource:
+        """Set or query the RX channel source of RS232 decoding."""
+        return DecoderUartSource(self._query(":RX?"))
+
+    @rx.setter
+    def rx(self, value: DecoderUartSource):
+        self._write(":RX %s" % (value.value))
+
+    @property
+    def polarity(self) -> DecoderUartPolarity:
+        """Set or query the polarity of RS232 decoding.
+        Negative polarity high level = 0, low level = 1 (use this for RS232)
+        Positive polarity high level = 1, low level = 0 (use this for TTL)"""
+        return DecoderUartPolarity(self._query(":POL?"))
+
+    @polarity.setter
+    def polarity(self, value: DecoderUartPolarity):
+        self._write(":POL %s" % (value.value))
+
+    @property
+    def endian(self) -> DecoderUartEndian:
+        """Set or query the endian of RS232 decoding."""
+        return DecoderUartEndian(self._query(":END?"))
+
+    @endian.setter
+    def endian(self, value: DecoderUartEndian):
+        self._write(":END %s" % (value.value))
+
+    @property
+    def baudrate(self) -> int:
+        """Set or query the baud rate of UART decoding. The default unit is bps (bits per second)."""
+        return self._query_int(":BAUD?")
+
+    @baudrate.setter
+    def baudrate(self, value: int):
+        assert value >= 110 and value <= 20e6
+        self._write_int(":BAUD", value)
+
+    @property
+    def width(self) -> int:
+        """Set or query the width of each frame of data in UART decoding."""
+        return self._query_int(":WIDT?")
+
+    @width.setter
+    def width(self, value: int):
+        assert value >= 5 and value <= 8
+        self._write_int(":WIDT", value)
+
+    @property
+    def stopbits(self) -> DecoderUartStopbits:
+        """Set or query the stop bit after each frame of data in RS232 decoding."""
+        return DecoderUartStopbits(self._query(":STOP?"))
+
+    @stopbits.setter
+    def stopbits(self, value: DecoderUartStopbits):
+        self._write(":STOP %s" % (value.value))
+
+    @property
+    def parity(self) -> DecoderUartParity:
+        """Set or query the even-odd check mode of the data transmission in UART decoding."""
+        return DecoderUartParity(self._query(":PAR?"))
+
+    @parity.setter
+    def parity(self, value: DecoderUartParity):
+        self._write(":PAR %s" % (value.value))
+
+class DecoderIicSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class DecoderIicAddress(Enum):
+    Normal = "NORM"
+    ReadWrite = "RW"
+
+class _DecoderIic(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:UART" % (index))
+
+    @property
+    def clk(self) -> DecoderIicSource:
+        """Set or query the signal source of the clock channel in I2C decoding."""
+        return DecoderIicSource(self._query(":CLK?"))
+
+    @clk.setter
+    def clk(self, value: DecoderIicSource):
+        self._write(":CLK %s" % (value.value))
+
+    @property
+    def data(self) -> DecoderIicSource:
+        """Set or query the signal source of the data channel in I2C decoding."""
+        return DecoderIicSource(self._query(":DATA?"))
+
+    @data.setter
+    def data(self, value: DecoderIicSource):
+        self._write(":DATA %s" % (value.value))
+
+    @property
+    def address(self) -> DecoderIicAddress:
+        """Set or query the address mode of I2C decoding."""
+        return DecoderIicAddress(self._query(":ADDR?"))
+
+    @address.setter
+    def address(self, value: DecoderIicAddress):
+        self._write(":ADDR %s" % (value.value))
+
+class DecoderSpiSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+    Off = "OFF"
+
+class DecoderSpiCspolarity(Enum):
+    ActiveLow = "NCS"
+    ActiveHigh = "CS"
+
+class DecoderSpiFramesync(Enum):
+    Chipselect = "CS"
+    Timeout = "TIM"
+
+class DecoderSpiPolarity(Enum):
+    Negative = "NEG"
+    Positive = "POS"
+
+class DecoderSpiClockedge(Enum):
+    Rise = "RISE"
+    Fall = "FALL"
+
+class DecoderSpiEndian(Enum):
+    LSB = "LSB"
+    MSB = "MSB"
+
+class _DecoderSpi(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:SPI" % (index))
+
+    @property
+    def clk(self) -> DecoderSpiSource:
+        """Set or query the signal source of the clock channel in SPI decoding."""
+        return DecoderSpiSource(self._query(":CLK?"))
+
+    @clk.setter
+    def clk(self, value: DecoderSpiSource):
+        assert value != DecoderSpiSource.Off
+        self._write(":CLK %s" % (value.value))
+
+    @property
+    def miso(self) -> DecoderSpiSource:
+        """Set or query the MISO channel source in SPI decoding."""
+        return DecoderSpiSource(self._query(":MISO?"))
+
+    @miso.setter
+    def miso(self, value: DecoderSpiSource):
+        self._write(":MISO %s" % (value.value))
+
+    @property
+    def mosi(self) -> DecoderSpiSource:
+        """Set or query the MOSI channel source in SPI decoding."""
+        return DecoderSpiSource(self._query(":MOSI?"))
+
+    @mosi.setter
+    def mosi(self, value: DecoderSpiSource):
+        self._write(":MOSI %s" % (value.value))
+
+    @property
+    def cs(self) -> DecoderSpiSource:
+        """Set or query the CS channel source in SPI decoding."""
+        return DecoderSpiSource(self._query(":CS?"))
+
+    @cs.setter
+    def cs(self, value: DecoderSpiSource):
+        assert value != DecoderSpiSource.Off
+        self._write(":CS %s" % (value.value))
+
+    @property
+    def cs_polarity(self) -> DecoderSpiCspolarity:
+        """Set or query the CS polarity in SPI decoding."""
+        return DecoderSpiCspolarity(self._query(":SEL?"))
+
+    @cs_polarity.setter
+    def cs_polarity(self, value: DecoderSpiCspolarity):
+        self._write(":SEL %s" % (value.value))
+
+    @property
+    def frame_sync(self) -> DecoderSpiFramesync:
+        """Set or query the frame synchronization mode of SPI decoding."""
+        return DecoderSpiFramesync(self._query(":MODE?"))
+
+    @frame_sync.setter
+    def frame_sync(self, value: DecoderSpiFramesync):
+        self._write(":MODE %s" % (value.value))
+
+    @property
+    def timeout(self) -> float:
+        """Set or query the timeout time in the timeout mode of SPI decoding. 
+        The default unit is s."""
+        return self._query_float(":TIM?")
+
+    @timeout.setter
+    def timeout(self, value: float):
+        assert value > 0
+        self._write_float(":TIM", value)
+
+    @property
+    def polarity(self) -> DecoderSpiPolarity:
+        """Set or query the polarity of the SDA data line in SPI decoding."""
+        return DecoderSpiPolarity(self._query(":POL?"))
+
+    @polarity.setter
+    def polarity(self, value: DecoderSpiPolarity):
+        self._write(":POL %s" % (value.value))
+
+    @property
+    def clock_edge(self) -> DecoderSpiClockedge:
+        """Set or query the clock type when the instrument samples the data line in SPI decoding."""
+        return DecoderSpiClockedge(self._query(":EDGE?"))
+
+    @clock_edge.setter
+    def clock_edge(self, value: DecoderSpiClockedge):
+        self._write(":EDGE %s" % (value.value))
+
+    @property
+    def endian(self) -> DecoderSpiEndian:
+        """Set or query the endian of the SPI decoding data."""
+        return DecoderSpiEndian(self._query(":END?"))
+
+    @endian.setter
+    def endian(self, value: DecoderSpiEndian):
+        self._write(":END %s" % (value.value))
+
+    @property
+    def width(self) -> int:
+        """Set or query the number of bits of each frame of data in SPI decoding."""
+        return self._query_int(":WIDT?")
+
+    @width.setter
+    def width(self, value: int):
+        assert value >= 8 and value <= 32
+        self._write_int(":WIDT", value)
+
+class DecoderParallelSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class DecoderParallelEdge(Enum):
+    Rise = "RISE"
+    Fall = "FALL"
+    Both = "BOTH"
+
+class DecoderParallelPolarity(Enum):
+    Negative = "NEG"
+    Positive = "POS"
+
+class _DecoderSpiBitsource(_Scpihelper):
+    """Set ro query the channel source of the data bit."""
+
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:PAR" % (index))
+
+    def __getitem__(self, key):
+        assert key >= 0 and key <= 15
+        self._write_int(":BITX", key)
+        return DecoderParallelSource(self._query(":SOUR?"))
+
+    def __setitem__(self, key, value: DecoderParallelSource):
+        assert key >= 0 and key <= 15
+        self._write_int(":BITX", key)
+        self._write(":SOUR %s" % (value.value))
+
+class _DecoderParallel(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        super().__init__(scope, ":DEC%u:PAR" % (index))
+
+        self.bits = _DecoderSpiBitsource(scope, index)
+
+    @property
+    def clock(self) -> Enum:
+        """Set or query the CLK channel source of parallel decoding."""
+        return Enum(self._query(":CLK?"))
+
+    @clock.setter
+    def clock(self, value: Enum):
+        self._write(":CLK %s" % (value.value))
+
+    @property
+    def edge(self) -> DecoderParallelEdge:
+        """Set or query the edge type of the clock channel when the instrument samples the data channel in parallel decoding."""
+        return DecoderParallelEdge(self._query(":EDGE?"))
+
+    @edge.setter
+    def edge(self, value: DecoderParallelEdge):
+        self._write(":EDGE %s" % (value.value))
+
+    @property
+    def width(self) -> int:
+        """Set or query the data width (namely the number of bits of each frame of data) of the parallel bus."""
+        return self._query_int(":WIDT?")
+
+    @width.setter
+    def width(self, value: int):
+        assert value >= 1 and value <= 16
+        self._write_int(":WIDT", value)
+
+    @property
+    def prop_enum(self) -> DecoderParallelPolarity:
+        """Set or query the data polarity of parallel decoding"""
+        return DecoderParallelPolarity(self._query(":POL?"))
+
+    @prop_enum.setter
+    def prop_enum(self, value: DecoderParallelPolarity):
+        self._write(":POL %s" % (value.value))
+
+    @property
+    def noise_reject(self) -> bool:
+        """Turn on or off the noise rejection function of parallel decoding, 
+        or query the status of the noise rejection function of parallel decoding."""
+        return self._query_bool(":NREJ?")
+    
+    @noise_reject.setter
+    def noise_reject(self, value: bool):
+        self._write_bool(":NREJ", value)
+
+    @property
+    def noise_reject_time(self) -> float:
+        """Set or query the noise rejection time of parallel decoding. The default unit is s."""
+        return self._query_float(":NRT?")
+
+    @noise_reject_time.setter
+    def noise_reject_time(self, value: float):
+        assert value >= 0 and value <= 100e-3
+        self._write_float(":NRT", value)
+
+    @property
+    def clock_compensation(self) -> float:
+        """Set or query the clock compensation time of parallel decoding. The default unit is s."""
+        return self._query_float(":CCOM?")
+
+    @clock_compensation.setter
+    def clock_compensation(self, value: float):
+        assert value >= -100e-3 and value <= 100e-3
+        self._write_float(":CCOM", value)
+
+    @property
+    def plot(self) -> bool:
+        """Turn on or off the curve function of parallel decoding, or query the status of the curve function of parallel decoding."""
+        return self._query_bool(":PLOT?")
+    
+    @plot.setter
+    def plot(self, value: bool):
+        self._write_bool(":PLOT", value)
+
+class DisplayType(Enum):
+    Vectors = "VECT"
+    Dots = "DOTS"
+
+class DisplayPersistence(Enum):
+    Minimum = "MIN"
+    Time_100ms = "0.1"
+    Time_200ms = "0.2"
+    Time_500ms = "0.5"
+    Time_1s = "1"
+    Time_5s = "5"
+    Time_10s = "10"
+    Infinite = "INF"
+
+class DisplayGrid(Enum):
+    Full = "FULL"
+    Half = "GALF"
+    Off = "NONE"
 
 class DisplayDataFormat(Enum):
     BMP24 = "BMP24"
@@ -665,11 +1488,9 @@ class DisplayDataFormat(Enum):
     JPEG = "JPEG"
     TIFF = "TIFF"
 
-
 class _Display(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":DISP")
+        super().__init__(scope, ":DISP")
 
     def clear(self):
         """Clear all the waveforms on the screen."""
@@ -696,18 +1517,7 @@ class _Display(_Scpihelper):
             format.value
         )
 
-        #self.scope.resource.write(cmd)
-        #data = self.scope.resource.read_raw()
-        #
-        ##remove the TMC block header
-        #if data[0] != 0x23: #first character must be a #
-        #    raise Exception("No SOF for TMC block header")
-        #header_len = data[1] - 0x30 # it's an ASCII number, so just substract the offset of 0
-        #
-        #data = data[header_len + 2:-1]
-        #
-
-        data = bytearray(res.query_binary_values(cmd, "B"))
+        data = bytearray(self.resource.query_binary_values(cmd, "B"))
 
         if filename:
             try:
@@ -740,7 +1550,7 @@ class _Display(_Scpihelper):
     @property
     def waveform_brightness(self) -> int:
         """Set or query the waveform brightness."""
-        return self._queryint(":WBR?")
+        return self._query_int(":WBR?")
 
     @waveform_brightness.setter
     def waveform_brightness(self, value: int):
@@ -758,20 +1568,532 @@ class _Display(_Scpihelper):
 
     @property
     def grid_brightness(self) -> int:
-        """"""
-        return self._queryint(":GBR?")
+        """Set or query the grid type of screen display."""
+        return self._query_int(":GBR?")
 
     @grid_brightness.setter
     def grid_brightness(self, value: int):
         assert value >= 0 and value <= 100
         self._write(":GBR %u" % (value))
 
-#TODO: Event Table
+class EventTableFormat(Enum):
+    Hexadecimal = "HEX"
+    ASCII = "ASC"
+    Decimal = "DEC"
+
+class EventTableView(Enum):
+    Package = "PACK"
+    Detail = "DET"
+    Payload = "PAYL"
+
+class EventTableColumn(Enum):
+    Data = "DATA"
+    TX = "TX"
+    RX = "RX"
+    MISO = "MISO"
+    MOSI = "MOSI"
+
+class EventTableSort(Enum):
+    Ascending = "ASC"
+    Descending = "DESC"
+
+class _EventTable(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index in (1, 2)
+        self.index = index
+        super().__init__(scope, ":ETAB%u" % (index))
+
+    @property
+    def display(self) -> bool:
+        """Turn on or off the decoding event table, or query the status of the decoding event table."""
+        return self._query_bool(":DISP?")
+    
+    @display.setter
+    def display(self, value: bool):
+        self._write_bool(":DISP", value)
+
+    @property
+    def format(self) -> EventTableFormat:
+        """Set or query the data display format of the event table."""
+        return EventTableFormat(self._query(":FORM?"))
+
+    @format.setter
+    def format(self, value: EventTableFormat):
+        self._write(":FORM %s" % (value.value))
+
+    @property
+    def view(self) -> EventTableView:
+        """Set or query the display mode of the event table."""
+        return EventTableView(self._query(":VIEW?"))
+
+    @view.setter
+    def view(self, value: EventTableView):
+        self._write(":VIEW %s" % (value.value))
+
+    @property
+    def column(self) -> EventTableColumn:
+        """Set or query the current column of the event table."""
+        return EventTableColumn(self._query(":COL?"))
+
+    @column.setter
+    def column(self, value: EventTableColumn):
+        self._write(":COL %s" % (value.value))
+
+    @property
+    def row(self) -> int:
+        """Set or query the current row of the event table."""
+        return self._query_int(":ROW?")
+
+    @row.setter
+    def row(self, value: int):
+        assert True
+        self._write_int(":ROW", value)
+
+    @property
+    def sort(self) -> EventTableSort:
+        """Set or query the display type of the decoding results in the event table."""
+        return EventTableSort(self._query(":SORT?"))
+
+    @sort.setter
+    def sort(self, value: EventTableSort):
+        self._write(":SORT %s" % (value.value))
+
+    @property
+    def data(self) -> str:
+        tmp = self._query(":DATA?", True)
+        if len(tmp) < 2:
+            return ""
+        if tmp[0] != "#":
+            raise Exception("No TMC header found")
+        hlen = int(tmp[1])
+
+        return tmp[hlen+2:]
+
 #TODO: Function
-#TODO: digital channels
+#TODO: Digital Channels
 #TODO: LAN
-#TODO: Math
-#TODO: Mask
+
+class MathOperator(Enum):
+    Add = "ADD"
+    Subtract = "SUBT"
+    Multiply = "MULT"
+    Division = "DIV"
+    And = "AND"
+    Or = "OR"
+    Xor = "XOR"
+    Not = "NOT"
+    FFT = "FFT"
+    Integrate = "INTG"
+    Differentiate = "DIFF"
+    Sqrt = "SQRT"
+    Log = "LOG"
+    Ln = "LN"
+    Exp = "EXP"
+    Absolute = "ABS"
+    Filter = "FILT"
+
+class MathAlgebraicSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+    FX = "FX"
+
+class MathLogicSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+    FX = "FX"
+
+class _Math(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MATH")
+
+        self.fft = _MathFFT(scope)
+        self.filter = _MathFilter(scope)
+        self.option = _MathOption(scope)
+    
+    @property
+    def display(self) -> bool:
+        """Enable or disable the math operation function or query the math operation status."""
+        return self._query_bool(":DISP?")
+    
+    @display.setter
+    def display(self, value: bool):
+        self._write_bool(":DISP", value)
+
+    @property
+    def operator(self) -> MathOperator:
+        """Set or query the operator of the math operation."""
+        return MathOperator(self._query(":OPER?"))
+
+    @operator.setter
+    def operator(self, value: MathOperator):
+        self._write(":OPER %s" % (value.value))
+
+    @property
+    def source1(self) -> MathAlgebraicSource:
+        """Set or query the source or source A of algebraic operation/functional operation/the outer layer operation of compound operation."""
+        return MathAlgebraicSource(self._query(":SOUR1?"))
+
+    @source1.setter
+    def source1(self, value: MathAlgebraicSource):
+        self._write(":SOUR1 %s" % (value.value))
+
+    @property
+    def source2(self) -> MathAlgebraicSource:
+        """Set or query the source or source B of algebraic operation/functional operation/the outer layer operation of compound operation."""
+        return MathAlgebraicSource(self._query(":SOUR2?"))
+
+    @source2.setter
+    def source2(self, value: MathAlgebraicSource):
+        self._write(":SOUR2 %s" % (value.value))
+
+    @property
+    def logic_source1(self) -> MathLogicSource:
+        """Set or query source A of logic operation."""
+        return MathLogicSource(self._query(":LSOU1?"))
+
+    @logic_source1.setter
+    def logic_source1(self, value: MathLogicSource):
+        self._write(":LSOU1 %s" % (value.value))
+
+    @property
+    def logic_source2(self) -> MathLogicSource:
+        """Set or query source B of logic operation."""
+        return MathLogicSource(self._query(":LSOU2?"))
+
+    @logic_source2.setter
+    def logic_source2(self, value: MathLogicSource):
+        self._write(":LSOU2 %s" % (value.value))
+
+    @property
+    def scale(self) -> float:
+        """Set or query the vertical scale of the operation result. Must be in 1-2-5 steps
+        The unit depends on the operator currently selected and the unit of the source."""
+        return self._query_float(":SCAL?")
+
+    @scale.setter
+    def scale(self, value: float):
+        assert value >= 1e-12 and value >= 5e12
+        self._write_float(":SCAL", value)
+    
+    @property
+    def offset(self) -> float:
+        """et or query the vertical offset of the operation result. 
+        The unit depends on the operator currently selected and the unit of the source.
+        
+        Related to the vertical scale of the operation result 
+        Range: (-1000 x MathVerticalScale) to (1000 x MathVerticalScale) 
+        Step: MathVerticalScale/50"""
+        return self._query_float(":OFFS?")
+
+    @offset.setter
+    def offset(self, value: float):
+        self._write_float(":OFFS", value)
+
+    @property
+    def invert(self) -> bool:
+        """Enable or disable the inverted display mode of the operation result, 
+        or query the inverted display mode status of the operation result."""
+        return self._query_bool(":INV?")
+    
+    @invert.setter
+    def invert(self, value: bool):
+        self._write_bool(":INV", value)
+
+    def reset(self):
+        """Sending this command, the instrument adjusts the vertical scale of the operation result to the
+        most proper value according to the current operator and the horizontal timebase of the source."""
+        self._write(":RES")
+
+class MathFFTSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class MathFFTWindow(Enum):
+    Rectangle = "RECT"
+    Blackman = "BLAC"
+    Hanning = "HANN"
+    Hamming = "HAMM"
+    Flattop = "FLAT"
+    Triangle = "TRI"
+
+class MathFFTUnit(Enum):
+    Vrms = "VRMS"
+    Decibel = "DB"
+
+class MathFFTMode(Enum):
+    Trace = "TRAC"
+    Memory = "MEM"
+
+class _MathFFT(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MATH:FFT")
+    
+    @property
+    def source(self) -> MathFFTSource:
+        """Set or query the source of FFT operation/filter."""
+        return MathFFTSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: MathFFTSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def window(self) -> MathFFTWindow:
+        """Set or query the window function of the FFT operation."""
+        return MathFFTWindow(self._query(":WIND?"))
+
+    @window.setter
+    def window(self, value: MathFFTWindow):
+        self._write(":WIND %s" % (value.value))
+
+    @property
+    def prop_bool(self) -> bool:
+        """Enable or disable the half-screen display mode of the FFT operation, or query the status 
+        of the half display mode of the FFT operation."""
+        return self._query_bool(":SPL?")
+    
+    @prop_bool.setter
+    def prop_bool(self, value: bool):
+        self._write_bool(":SPL", value)
+
+    @property
+    def unit(self) -> MathFFTUnit:
+        """Set or query the vertical unit of the FFT operation result."""
+        return MathFFTUnit(self._query(":UNIT?"))
+
+    @unit.setter
+    def unit(self, value: MathFFTUnit):
+        self._write(":UNIT %s" % (value.value))
+
+    @property
+    def horizontal_scale(self) -> float:
+        """Set or query the horizontal scale of the FFT operation result. The default unit is Hz.
+        Can be set to 1/1000, 1/400, 1/200, 1/100, 1/40, or 1/20 of the FFT sample rate."""
+        return self._query_float(":HSC?")
+
+    @horizontal_scale.setter
+    def horizontal_scale(self, value: float):
+        assert value > 0
+        self._write_float(":HSC", value)
+
+    @property
+    def center_frequency(self) -> float:
+        """Set or query the center frequency of the FFT operation result, namely the frequency 
+        relative to the horizontal center of the screen.
+        The default unit is Hz."""
+        return self._query_float(":HCEN?")
+
+    @center_frequency.setter
+    def center_frequency(self, value: float):
+        assert value > 0
+        self._write_float(":HCEN", value)
+    
+    @property
+    def mode(self) -> MathFFTMode:
+        """Set or query the FFT mode."""
+        return MathFFTMode(self._query(":MODE?"))
+
+    @mode.setter
+    def mode(self, value: MathFFTMode):
+        self._write(":MODE %s" % (value.value))
+
+class MathFilterType(Enum):
+    Lowpass = "LPAS"
+    Highpass = "HPAS"
+    Bandpass = "BPAS"
+    Bandstop = "BSTOP"
+
+class _MathFilter(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MATH:FILT")
+
+    @property
+    def type(self) -> MathFilterType:
+        """Set or query the filter type."""
+        return MathFilterType(self._query(":TYPE?"))
+
+    @type.setter
+    def type(self, value: MathFilterType):
+        self._write(":TYPE %s" % (value.value))
+
+    @property
+    def cutoff_frequency1(self) -> float:
+        """Set or query the cutoff frequency (ωc1) of the low pass/high pass filter or cutoff 
+        frequency 1 (ωc1) of the band pass/band stop filter. The default unit is Hz."""
+        return self._query_float(":W1?")
+
+    @cutoff_frequency1.setter
+    def cutoff_frequency1(self, value: float):
+        assert value > 0
+        self._write_float(":W1", value)
+
+    @property
+    def cutoff_frequency2(self) -> float:
+        """Set or query the cutoff frequency (ωc2) of the low pass/high pass filter or cutoff 
+        frequency 2 (ωc2) of the band pass/band stop filter. The default unit is Hz."""
+        return self._query_float(":W2?")
+
+    @cutoff_frequency2.setter
+    def cutoff_frequency2(self, value: float):
+        assert value > 0
+        self._write_float(":W2", value)
+
+class _MathOption(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MATH:OPT")
+
+        self.fx = _MathOptionFX(scope)
+
+    @property
+    def start(self) -> int:
+        """Set or query the start point of the waveform math operation."""
+        return self._query_int(":STAR?")
+
+    @start.setter
+    def start(self, value: int):
+        assert value >= 0 and value < 1200
+        self._write_int(":STAR", value)
+
+    @property
+    def end(self) -> int:
+        """Set or query the end point of the waveform math operation."""
+        return self._query_int(":END?")
+
+    @end.setter
+    def end(self, value: int):
+        assert value >= 1 and value <= 1200
+        self._write_int(":END", value)
+
+    @property
+    def invert(self) -> bool:
+        """Enable or disable the inverted display mode of the operation result, 
+        or query the inverted display mode status of the operation result."""
+        return self._query_bool(":INV?")
+    
+    @invert.setter
+    def invert(self, value: bool):
+        self._write_bool(":INV", value)
+
+    @property
+    def sensitivity(self) -> float:
+        """Set or query the sensitivity of the logic operation. The default unit is div 
+        (namely the current vertical scale)."""
+        return self._query_float(":SENS?")
+
+    @sensitivity.setter
+    def sensitivity(self, value: float):
+        assert value >= 0 and value <= 0.96
+        self._write_float(":SENS", value)
+
+    @property
+    def distance(self) -> int:
+        """Set or query the smoothing window width of differential operation (diff)."""
+        return self._query_int(":DIS?")
+
+    @distance.setter
+    def distance(self, value: int):
+        assert value >= 3 and value >= 201
+        self._write_int(":DIS", value)
+
+    @property
+    def autoscale(self) -> bool:
+        """Enable or disable the auto scale setting of the operation result 
+        or query the status of the auto scale setting."""
+        return self._query_bool(":ASC?")
+    
+    @autoscale.setter
+    def autoscale(self, value: bool):
+        self._write_bool(":ASC", value)
+
+    @property
+    def threshold1(self) -> float:
+        """Set or query the threshold level of source A in logic operations. The default unit is V.
+        Range: ((-4 x VerticalScale - VerticalOffset) to 4 x VerticalScale - VerticalOffset) """
+        return self._query_float(":THR1?")
+
+    @threshold1.setter
+    def threshold1(self, value: float):
+        assert True
+        self._write_float(":THR1", value)
+
+    @property
+    def threshold2(self) -> float:
+        """Set or query the threshold level of source B in logic operations. The default unit is V.
+        Range: ((-4 x VerticalScale - VerticalOffset) to 4 x VerticalScale - VerticalOffset) """
+        return self._query_float(":THR2?")
+
+    @threshold2.setter
+    def threshold2(self, value: float):
+        assert True
+        self._write_float(":THR2", value)
+
+class MathOptionFXSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class MathOptionFXOperator(Enum):
+    Add = "ADD"
+    Subtract = "SUBT"
+    Multiply = "MULT"
+    Division = "DIV"
+
+class _MathOptionFX(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MATH:OPT:FX")
+
+    @property
+    def source1(self) -> MathOptionFXSource:
+        """Set or query source A of the inner layer operation of compound operation."""
+        return MathOptionFXSource(self._query(":SOUR1?"))
+
+    @source1.setter
+    def source1(self, value: MathOptionFXSource):
+        self._write(":SOUR1 %s" % (value.value))
+
+    @property
+    def source2(self) -> MathOptionFXSource:
+        """Set or query source B of the inner layer operation of compound operation."""
+        return MathOptionFXSource(self._query(":SOUR2?"))
+
+    @source2.setter
+    def source2(self, value: MathOptionFXSource):
+        self._write(":SOUR2 %s" % (value.value))
+
+    @property
+    def operator(self) -> MathOptionFXOperator:
+        """Set or query the operator of the inner layer operation of compound operation."""
+        return MathOptionFXOperator(self._query(":OPER?"))
+
+    @operator.setter
+    def operator(self, value: MathOptionFXOperator):
+        self._write(":OPER %s" % (value.value))
+
+
+#TODO: Mask - Not available on DS1054z
 
 class MeasureSource(Enum):
     Digital0 = "D0"
@@ -871,8 +2193,7 @@ class MeasureStatisticType(Enum):
 
 class _Measure(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":MEAS")
+        super().__init__(scope, ":MEAS")
 
     @property
     def source(self) -> MeasureSource:
@@ -895,7 +2216,7 @@ class _Measure(_Scpihelper):
     @property
     def counter_value(self) -> float:
         """Query the measurement result of the frequency counter. The default unit is Hz."""
-        return self._queryfloat(":COUN:VAL?")
+        return self._query_float(":COUN:VAL?")
     
     def clear(self, item):
         """Clear one or all of the last five measurement items enabled.
@@ -919,11 +2240,11 @@ class _Measure(_Scpihelper):
     def all_display(self) -> bool:
         """Enable or disable the all measurement function, 
         or query the status of the all measurement function."""
-        return self._querybool(":ADIS?")
+        return self._query_bool(":ADIS?")
     
     @all_display.setter
     def all_display(self, value: bool):
-        self._write(":ADIS %u" % (1 if value else 0))
+        self._write_bool(":ADIS", value)
 
     #TODO: AMSource
 
@@ -931,7 +2252,7 @@ class _Measure(_Scpihelper):
     def setup_max(self) -> int:
         """Set or query the upper limit of the threshold (expressed in the percentage of amplitude) 
         in time, delay, and phase measurements."""
-        return self._queryint(":SET:MAX?")
+        return self._query_int(":SET:MAX?")
 
     @setup_max.setter
     def setup_max(self, value: int = 90):
@@ -942,7 +2263,7 @@ class _Measure(_Scpihelper):
     def setup_mid(self) -> int:
         """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
         in time, delay, and phase measurements."""
-        return self._queryint(":SET:MID?")
+        return self._query_int(":SET:MID?")
 
     @setup_mid.setter
     def setup_mid(self, value: int = 50):
@@ -953,7 +2274,7 @@ class _Measure(_Scpihelper):
     def setup_min(self) -> int:
         """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
         in time, delay, and phase measurements."""
-        return self._queryint(":SET:MIN?")
+        return self._query_int(":SET:MIN?")
 
     @setup_min.setter
     def setup_min(self, value: int = 10):
@@ -968,11 +2289,11 @@ class _Measure(_Scpihelper):
     @property
     def statistics_display(self) -> bool:
         """Enable or disable the statistic function, or query the status of the statistic function."""
-        return self._querybool(":STAT:DISP?")
+        return self._query_bool(":STAT:DISP?")
     
     @statistics_display.setter
     def statistics_display(self, value: bool):
-        self._write(":STAT:DISP %u" % (1 if value else 0))
+        self._write_bool(":STAT:DISP", value)
 
     @property
     def statistics_mode(self) -> MeasureStatisticMode:
@@ -1016,7 +2337,7 @@ class _Measure(_Scpihelper):
         if source2 is not None:
             message += ",%s" % (source2.value)
 
-        return self._queryfloat(message)
+        return self._query_float(message)
 
     def item_add(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
         """Measure any waveform parameter of the specified source"""
@@ -1046,10 +2367,120 @@ class _Measure(_Scpihelper):
         if source2 is not None:
             message += ",%s" % (source2.value)
 
-        return self._queryfloat(message)
+        return self._query_float(message)
 
+class ReferenceSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+    Math = "MATH"
 
-#TODO: Reference
+class _References(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":REF")
+
+        self._items = [_Reference(scope, i) for i in range(1, 11)]
+
+    def __getitem__(self, i):
+        assert i >= 1 and i <= 10
+        return self._items[i - 1]
+
+    @property
+    def display(self) -> bool:
+        """Enable or disable the REF function, or query the status of the REF function."""
+        return self._query_bool(":DISP?")
+    
+    @display.setter
+    def display(self, value: bool):
+        self._write_bool(":DISP", value)
+
+class ReferenceColor(Enum):
+    Gray = "GRAY"
+    Green = "GREE"
+    Lightblue = "LBL"
+    Magenta = "MAG"
+    Orange = "ORAN"
+
+class _Reference(_Scpihelper):
+    def __init__(self, scope: DS1000z, index: int):
+        assert index >= 1 and index <= 10
+        self.index = index
+        super().__init__(scope, ":REF%u" % (index))
+
+    @property
+    def enable(self) -> bool:
+        """Enable or disable the specified reference channel, or query the status of the specified reference channel."""
+        return self._query_bool(":ENAB?")
+    
+    @enable.setter
+    def enable(self, value: bool):
+        self._write_bool(":ENAB", value)
+
+    @property
+    def source(self) -> ReferenceSource:
+        """Set or query the source of the current reference channel."""
+        return ReferenceSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: ReferenceSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def vertical_scale(self) -> float:
+        """Set or query the vertical scale of the specified reference channel. 
+        The unit is the same as the unit of the source."""
+        return self._query_float(":VSC?")
+
+    @vertical_scale.setter
+    def vertical_scale(self, value: float):
+        assert value >= 1e-3 and value <= 100
+        self._write_float(":VSC", value)
+
+    @property
+    def vertical_offset(self) -> float:
+        """Set or query the vertical offset of the specified reference channel. 
+        The unit is the same as the unit of the source.
+        Range: (-10 x RefVerticalScale) to (10 x RefVerticalScale)"""
+        return self._query_float(":VOFF?")
+
+    @vertical_offset.setter
+    def vertical_offset(self, value: float):
+        self._write_float(":VOFF", value)
+
+    def reset(self):
+        """Reset the vertical scale and vertical offset of the specified reference channel to their default values."""
+        self._write(":RES")
+    
+    def save(self):
+        """Store the waveform of the current reference channel to the internal memory as reference waveform."""
+        self._write(":SAV")
+
+    @property
+    def color(self) -> ReferenceColor:
+        """Set or query the display color of the current reference channel."""
+        return ReferenceColor(self._query(":COL?"))
+
+    @color.setter
+    def color(self, value: ReferenceColor):
+        self._write(":COL %s" % (value.value))
+
 #TODO: Source
 #TODO: Storage
 #TODO: System
@@ -1062,66 +2493,65 @@ class TimebaseMode(Enum):
 
 class _Timebase(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":TIM")
+        super().__init__(scope, ":TIM")
 
     @property
     def delay_enable(self) -> bool:
         """Enable or disable the delayed sweep, or query the status of the delayed sweep."""
-        return self._querybool(":DEL:ENAB?")
+        return self._query_bool(":DEL:ENAB?")
     
     @delay_enable.setter
     def delay_enable(self, value: bool):
-        self._write(":DEL:ENAB %u" % (1 if value else 0))
+        self._write_bool(":DEL:ENAB", value)
 
     @property
     def delay_offset(self) -> float:
         """Set or query the delayed timebase offset. The default unit is s."""
-        return self._queryfloat(":DEL:OFFS?")
+        return self._query_float(":DEL:OFFS?")
 
     @delay_offset.setter
     def delay_offset(self, value: float):
         assert True
-        self._write(":DEL:OFFS %.4e" % (value))
+        self._write_float(":DEL:OFFS", value)
 
     @property
     def delay_scale(self) -> float:
         """Set or query the delayed timebase scale. The default unit is s/div."""
-        return self._queryfloat(":DEL:SCAL?")
+        return self._query_float(":DEL:SCAL?")
 
     @delay_scale.setter
     def delay_scale(self, value: float):
         assert True
-        self._write(":DEL:SCAL %.4e" % (value))
+        self._write_float(":DEL:SCAL", value)
 
     @property
     def offset(self) -> float:
         """Set or query the main timebase offset. The default unit is s."""
-        return self._queryfloat(":OFFS?")
+        return self._query_float(":OFFS?")
 
     @offset.setter
     def offset(self, value: float):
         assert True
-        self._write(":OFFS %.4e" % (value))
+        self._write_float(":OFFS", value)
 
     @property
     def scale(self) -> float:
         """Set or query the main timebase scale. The default unit is s/div."""
-        return self._queryfloat(":SCAL?")
+        return self._query_float(":SCAL?")
 
     @scale.setter
     def scale(self, value: float):
         assert True
-        self._write(":SCAL %.4e" % (value))
+        self._write_float(":SCAL", value)
 
     @property
     def mode(self) -> TimebaseMode:
         """Set or query the mode of the horizontal timebase."""
-        return TimebaseMode(self._query(":msg?"))
+        return TimebaseMode(self._query(":MODE?"))
 
     @mode.setter
     def mode(self, value: TimebaseMode):
-        self._write(":msg %s" % (value.value))
+        self._write(":MODE %s" % (value.value))
 
 class TriggerMode(Enum):
     Edge = "EDGE"
@@ -1160,10 +2590,10 @@ class TriggerSweep(Enum):
 
 class _Trigger(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":TRIG")
+        super().__init__(scope, ":TRIG")
 
-        self.edge = _Trigger_Edge(scope)
+        self.edge = _TriggerEdge(scope)
+        self.pulse = _TriggerPulse(scope)
 
     @property
     def mode(self) -> TriggerMode:
@@ -1176,7 +2606,7 @@ class _Trigger(_Scpihelper):
 
     @property
     def coupling(self) -> TriggerCoupling:
-        """"""
+        """Select or query the trigger coupling type."""
         return TriggerCoupling(self._query(":COUP?"))
 
     @coupling.setter
@@ -1201,21 +2631,21 @@ class _Trigger(_Scpihelper):
     @property
     def holdoff(self) -> float:
         """Set or query the trigger holdoff time. The default unit is s."""
-        return self._queryfloat(":HOLD?")
+        return self._query_float(":HOLD?")
 
     @holdoff.setter
     def holdoff(self, value: float):
         assert value >= 16e-9 and value <= 10
-        self._write(":HOLD %.4e" % (value))
+        self._write_float(":HOLD", value)
 
     @property
     def noise_rejection(self) -> bool:
         """Enable or disable noise rejection, or query the status of noise rejection."""
-        return self._querybool(":NREJ?")
+        return self._query_bool(":NREJ?")
     
     @noise_rejection.setter
     def prop_bool(self, value: bool):
-        self._write(":NREJ %u" % (1 if value else 0))
+        self._write_bool(":NREJ", value)
 
     @property
     def position(self) -> int:
@@ -1226,7 +2656,7 @@ class _Trigger(_Scpihelper):
            from the trigger position.
         An integer that is greater than 0 denotes that the return value is the position in the internal
         memory that corresponds to the trigger position."""
-        return self._queryint(":POS?")
+        return self._query_int(":POS?")
 
 class TriggerEdgeSource(Enum):
     Digital0 = "D0"
@@ -1256,10 +2686,9 @@ class TriggerEdgeSlope(Enum):
     Fall = "NEG"
     Both = "RFAL"
 
-class _Trigger_Edge(_Scpihelper):
+class _TriggerEdge(_Scpihelper):
     def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":TRIG:EDG")
+        super().__init__(scope, ":TRIG:EDG")
 
     @property
     def source(self) -> TriggerEdgeSource:
@@ -1284,15 +2713,109 @@ class _Trigger_Edge(_Scpihelper):
         """Set or query the trigger level in edge trigger. 
         The unit is the same as the current amplitude unit of the signal source selected.
         Range is ((-5 x VerticalScale - OFFSet) to 5 x VerticalScale - OFFSet"""
-        return self._queryfloat(":LEV?")
+        return self._query_float(":LEV?")
 
     @level.setter
     def level(self, value: float):
         assert True
-        self._write(":LEV %.4e" % (value))
+        self._write_float(":LEV", value)
 
 
-#TODO: :TRIGger:PULSe
+class TriggerPulseSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerPulseWhen(Enum):
+    PositiveGreater = "PGR"
+    PositiveLess = "PLES"
+    PositivePulseWindow = "PGL"
+
+    NegativeGreater = "NGR"
+    NegativeLess = "NLES"
+    NegativePulseWindow = "NGL"
+
+class _TriggerPulse(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:PULS")
+    
+    @property
+    def source(self) -> TriggerPulseSource:
+        """Set or query the channel of which the waveform data will be read."""
+        return TriggerPulseSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerPulseSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def when(self) -> TriggerPulseWhen:
+        """Set or query the trigger condition in pulse width trigger."""
+        return TriggerPulseWhen(self._query(":WHEN?"))
+
+    @when.setter
+    def when(self, value: TriggerPulseWhen):
+        self._write(":WHEN %s" % (value.value))
+
+    @property
+    def width(self) -> float:
+        """Set or query the pulse width in pulse width trigger. The default unit is s."""
+        return self._query_float(":WIDT?")
+
+    @width.setter
+    def width(self, value: float):
+        assert value >= 8e-9 and value <= 10
+        self._write_float(":WIDT", value)
+
+    @property
+    def upper_width(self) -> float:
+        """Set or query the upper pulse width in pulse width trigger. The default unit is s."""
+        return self._query_float(":UWID?")
+
+    @upper_width.setter
+    def upper_width(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":UWID", value)
+
+    @property
+    def lower_width(self) -> float:
+        """Set or query the lower pulse width in pulse width trigger. The default unit is s."""
+        return self._query_float(":WIDT?")
+
+    @lower_width.setter
+    def lower_width(self, value: float):
+        assert value >= 8e-9 and value <= 9.99
+        self._write_float(":WIDT", value)
+
+    @property
+    def level(self) -> float:
+        """Set or query the trigger level in pulse width trigger. 
+        The unit is the same as the current amplitude unit.
+        Range is ((-5 x VerticalScale - OFFSet) to 5 x VerticalScale - OFFSet"""
+        return self._query_float(":LEV?")
+
+    @level.setter
+    def level(self, value: float):
+        assert True
+        self._write_float(":LEV", value)
+
 #TODO: :TRIGger:SLOPe
 #TODO: :TRIGger:VIDeo
 #TODO: :TRIGger:PATTern
@@ -1331,8 +2854,16 @@ class WaveformSource(Enum):
     Math = "MATH"
 
 class WaveformMode(Enum):
+    """
+    Normal: read the waveform data displayed on the screen
+    Maximum: read the waveform data displayed on the screen when the instrument is in 
+        the run state and the waveform data in the internal memory in the stop state
+    Raw: read the waveform data in the internal memory. Note that the waveform data 
+        in the internal memory can only be read when the oscilloscope is in the stop
+        state and the oscilloscope cannot be operated during the reading process
+    """
     Normal = "NORM"
-    Maximum = "MAX"
+    Maximum = "MAX" 
     Raw = "RAW"
 
 class WaveformFormat(Enum):
@@ -1352,11 +2883,11 @@ class WaveformPreamble():
             self.format = WaveformFormat.ASCII
 
         self.type = None
-        if preambledata[1] == "":
+        if preambledata[1] == "0":
             self.type = WaveformMode.Normal
-        elif preambledata[1] == "":
+        elif preambledata[1] == "1":
             self.type = WaveformMode.Maximum
-        elif preambledata[1] == "":
+        elif preambledata[1] == "2":
             self.type = WaveformMode.Raw
 
         self.points = int(preambledata[2])
@@ -1372,7 +2903,7 @@ class WaveformPreamble():
 class _Waveform(_Scpihelper):
     def __init__(self, scope: DS1000z):
         self.scope = scope
-        super().__init__(scope.resource, ":WAV")
+        super().__init__(scope, ":WAV")
 
     @property
     def source(self) -> WaveformSource:
@@ -1401,8 +2932,6 @@ class _Waveform(_Scpihelper):
     def format(self, value: WaveformFormat):
         self._write(":FORM %s" % (value.value))
 
-    #TODO: :WAVeform:DATA? 
-
     @property
     def x_increment(self) -> float:
         """Query the time difference between two neighboring points 
@@ -1415,7 +2944,7 @@ class _Waveform(_Scpihelper):
 
         When the channel source is one from CHANnel1 to CHANnel4 or from D0 to D15, the unit is s. 
         When the channel source is MATH and the operation type is FFT, the unit is Hz."""
-        return self._queryfloat(":XINC?")
+        return self._query_float(":XINC?")
 
     @property
     def x_origin(self) -> float:
@@ -1430,12 +2959,12 @@ class _Waveform(_Scpihelper):
 
         When the channel source is one from CHANnel1 to CHANnel4 or from D0 to D15, the unit is s. 
         When the channel source is MATH and the operation type is FFT, the unit is Hz."""
-        return self._queryfloat(":XOR?")
+        return self._query_float(":XOR?")
 
     @property
     def x_reference_time(self) -> float:
         """Query the reference time of the specified channel source in the X direction."""
-        return self._queryfloat(":XREF?")
+        return self._query_float(":XREF?")
 
     @property
     def y_increment(self) -> float:
@@ -1449,7 +2978,7 @@ class _Waveform(_Scpihelper):
         YINCrement is related to the Verticalscale of the internal waveform and the Verticalscale 
         currently selected when the instrument is in stop status.
         """
-        return self._queryfloat(":YINC?")
+        return self._query_float(":YINC?")
 
     @property
     def y_origin(self) -> float:
@@ -1462,17 +2991,17 @@ class _Waveform(_Scpihelper):
         In MAX mode, YORigin = VerticalOffset/YINCrement when the instrument is in running 
         status; YORigin is related to the Verticalscale of the internal waveform and the 
         Verticalscale currently selected when the instrument is in stop status."""
-        return self._queryfloat(":YOR?")
+        return self._query_float(":YOR?")
 
     @property
     def y_reference(self) -> int:
         """Query the vertical reference position of the specified channel source in the Y direction."""
-        return self._queryint(":YREF?")
+        return self._query_int(":YREF?")
 
     @property
     def start(self) -> int:
         """Set or query the start point of waveform data reading."""
-        return self._queryint(":STAR?")
+        return self._query_int(":STAR?")
 
     @start.setter
     def start(self, value: int):
@@ -1482,7 +3011,7 @@ class _Waveform(_Scpihelper):
     @property
     def stop(self) -> int:
         """Set or query the stop point of waveform data reading."""
-        return self._queryint(":STOP?")
+        return self._query_int(":STOP?")
 
     @stop.setter
     def stop(self, value: int):
@@ -1492,7 +3021,6 @@ class _Waveform(_Scpihelper):
     @property
     def preamble(self) -> str:
         """Query and return all the waveform parameters."""
-        #TODO: split and interpret values
         tmp = self._query(":PRE?").split(",")
         return WaveformPreamble(tmp)
     
@@ -1500,6 +3028,20 @@ class _Waveform(_Scpihelper):
         source: WaveformSource = None, 
         mode: WaveformMode = WaveformMode.Normal, 
         start: int = 1, stop: int = math.inf):
+        """Read the waveform data.
+
+        Args:
+            source (WaveformSource, optional): Channel for the waveform data to be read. Defaults to None (which is the currently selected channel).
+            mode (WaveformMode, optional): see WaveformMode. Defaults to WaveformMode.Normal.
+            start (int, optional): start point of the data. Defaults to 1.
+            stop (int, optional): end point of the data. Defaults to math.inf.
+
+        Raises:
+            Exception: _description_
+
+        Returns:
+            _type_: _description_
+        """
         assert start >= 1 or start < 0
         assert stop >= start
 
@@ -1512,6 +3054,9 @@ class _Waveform(_Scpihelper):
 
         info = self.preamble
 
+        if info.format != WaveformFormat.Byte:
+            raise Exception("Currently only WaveformFormat.Byte is supported")
+
         # allow pythonic negative start points
         if start < 0:
             start = info.points + start
@@ -1522,43 +3067,49 @@ class _Waveform(_Scpihelper):
         if info.points < stop:
             stop = info.points
 
-        print("start: %u" % start)
-        print("stop: %u" % stop)
+        #print("start: %u" % start)
+        #print("stop: %u" % stop)
         
         point_cnt = stop - start + 1
 
         block_size = 250000 # maximum number of waveform points for each read
-        #block_size = 1000 # maximum number of waveform points for each read
         
         block_cnt = int(math.ceil(point_cnt / block_size))
         offset = start
         data_raw = []
 
         for i in range(0, block_cnt):
-            print("reading from: %u" % offset)
+            #print("reading from: %u" % offset)
             self.start = offset
             offset += block_size - 1
             
             if offset > stop:
                 offset = stop
-            print("reading to: %u" % offset)
+            #print("reading to: %u" % offset)
             self.stop = offset
             offset += 1
 
-            chunk = res.query_binary_values("%s:DATA?" % (self.message_prefix), "B")
+            chunk = self.resource.query_binary_values("%s:DATA?" % (self.message_prefix), "B")
             data_raw.extend(chunk)
 
-        return WaveformData(info, data_raw)
+        return WaveformData(source, info, start, stop, data_raw)
 
 class WaveformData():
-    def __init__(self, preamble: WaveformPreamble, data_raw: list):
+    def __init__(self, source: WaveformSource, preamble: WaveformPreamble, start: int, stop: int, data_raw: list):
         self.preamble = preamble
+        self.start = start
+        self.stop = stop
+        self.source = source
         self.data_raw = data_raw
 
         #data = [(y - self.preamble.yorigin - self.preamble.yreference) * self.preamble.yincrement for y in data_raw]
 
     def __getitem__(self, i):
         return (self.data_raw[i] - self.preamble.yorigin - self.preamble.yreference) * self.preamble.yincrement
+
+    @property
+    def data(self):
+        return [(y - self.preamble.yorigin - self.preamble.yreference) * self.preamble.yincrement for y in self.data_raw]
 
     def save_csv(self, filename, colsep_hint: bool = True, header: bool = True, column_separator: str = "\t", decimalpoint: str = ".", end: str = "\n"):
         fh = open(filename, "w")
@@ -1573,7 +3124,8 @@ class WaveformData():
             ))
 
         for i, v in enumerate(self.data_raw):
-            time = (i - self.preamble.xorigin - self.preamble.xreference) * self.preamble.xincrement
+            
+            time = ((i + self.start) - self.preamble.xorigin - self.preamble.xreference) * self.preamble.xincrement
             value = (v - self.preamble.yorigin - self.preamble.yreference) * self.preamble.yincrement
             times = "%.4e" % time
             values = "%.4e" % value
@@ -1583,57 +3135,3 @@ class WaveformData():
             fh.write("".join([times, column_separator, values, end]))
 
         fh.close()
-
-
-### Templates
-class _Template(_Scpihelper):
-    def __init__(self, scope: DS1000z):
-        self.scope = scope
-        super().__init__(scope.resource, ":TEMPLATE")
-
-    @property
-    def prop_bool(self) -> bool:
-        """"""
-        return self._querybool(":msg?")
-    
-    @prop_bool.setter
-    def prop_bool(self, value: bool):
-        self._write(":msg %u" % (1 if value else 0))
-
-    @property
-    def prop_float(self) -> float:
-        """"""
-        return self._queryfloat(":msg?")
-
-    @prop_float.setter
-    def prop_float(self, value: float):
-        assert True
-        self._write(":msg %.4e" % (value))
-
-    @property
-    def prop_int(self) -> int:
-        """"""
-        return self._queryint(":msg?")
-
-    @prop_int.setter
-    def prop_int(self, value: int):
-        assert True
-        self._write(":msg %u" % (value))
-
-
-    @property
-    def prop_enum(self) -> Enum:
-        """"""
-        return Enum(self._query(":msg?"))
-
-    @prop_enum.setter
-    def prop_enum(self, value: Enum):
-        self._write(":msg %s" % (value.value))
-
-if __name__ == "__main__":
-
-    rm = pyvisa.ResourceManager()
-    res = rm.open_resource('USB0::0x1AB1::0x04CE::DS1ZA171104975::INSTR')
-    dso = DS1000z(res)
-    data = dso.waveform.get_data(WaveformSource.Channel1, start = 1)
-    data.save_csv("waveform2.csv", decimalpoint=",")
