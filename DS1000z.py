@@ -1,7 +1,7 @@
 import math
 import os
 import pyvisa
-from enum import Enum
+from enum import Enum, Flag, auto
 
 class _Scpihelper():
     def __init__(self, scope, message_prefix: str = ""):
@@ -106,6 +106,7 @@ class DS1000z(_Scpihelper):
         self.math = _Math(self)
         self.measure = _Measure(self)
         self.reference = _References(self)
+        self.system = _System(self)
         self.timebase = _Timebase(self)
         self.trigger = _Trigger(self)
         self.waveform = _Waveform(self)
@@ -2191,9 +2192,50 @@ class MeasureStatisticType(Enum):
     Average = "AVER"
     Deviation = "DEV"
 
+class MeasureAllmeasureSource(Flag):
+    Channel1 = auto()
+    Channel2 = auto()
+    Channel3 = auto()
+    Channel4 = auto()
+    Math = auto()
+
+    @classmethod
+    def from_string(cls, s: str):
+        tmp = cls(0)
+        #FIXME: is there any better way to do this?
+        a = s.upper().split(",")
+        vals = {
+            "CHAN1" : cls.Channel1,
+            "CHAN2" : cls.Channel2,
+            "CHAN3" : cls.Channel3,
+            "CHAN4" : cls.Channel4,
+            "MATH" : cls.Math
+            }
+        for val in vals:
+            if val in a:
+                tmp |= vals[val]
+        return tmp
+
+    def to_string(self):
+        vals = {
+            "CHAN1" : self.Channel1,
+            "CHAN2" : self.Channel2,
+            "CHAN3" : self.Channel3,
+            "CHAN4" : self.Channel4,
+            "MATH" : self.Math
+            }
+        tmp = []
+        for val in vals:
+            if vals[val] in self:
+                tmp.append(val)
+        return ",".join(tmp)
+
 class _Measure(_Scpihelper):
     def __init__(self, scope: DS1000z):
         super().__init__(scope, ":MEAS")
+
+        self.setup = _MeasureSetup(scope)
+        self.statistics = _MeasureStatistics(scope)
 
     @property
     def source(self) -> MeasureSource:
@@ -2246,98 +2288,15 @@ class _Measure(_Scpihelper):
     def all_display(self, value: bool):
         self._write_bool(":ADIS", value)
 
-    #TODO: AMSource
-
     @property
-    def setup_max(self) -> int:
-        """Set or query the upper limit of the threshold (expressed in the percentage of amplitude) 
-        in time, delay, and phase measurements."""
-        return self._query_int(":SET:MAX?")
+    def allmeasure_source(self) -> MeasureAllmeasureSource:
+        """Set or query the source(s) of the all measurement function."""
+        ans = self._query(":AMS?")
+        return MeasureAllmeasureSource.from_string(ans)
 
-    @setup_max.setter
-    def setup_max(self, value: int = 90):
-        assert value >= 7 and value <= 95
-        self._write(":SET:MAX %u" % (value))
-
-    @property
-    def setup_mid(self) -> int:
-        """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
-        in time, delay, and phase measurements."""
-        return self._query_int(":SET:MID?")
-
-    @setup_mid.setter
-    def setup_mid(self, value: int = 50):
-        assert value >= 6 and value <= 94
-        self._write(":SET:MID %u" % (value))
-
-    @property
-    def setup_min(self) -> int:
-        """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
-        in time, delay, and phase measurements."""
-        return self._query_int(":SET:MIN?")
-
-    @setup_min.setter
-    def setup_min(self, value: int = 10):
-        assert value >= 5 and value <= 93
-        self._write(":SET:MIN %u" % (value))
-
-    #TODO: SET:PSA
-    #TODO: SET:PSB
-    #TODO: SET:DSA
-    #TODO: SET:DSB
-
-    @property
-    def statistics_display(self) -> bool:
-        """Enable or disable the statistic function, or query the status of the statistic function."""
-        return self._query_bool(":STAT:DISP?")
-    
-    @statistics_display.setter
-    def statistics_display(self, value: bool):
-        self._write_bool(":STAT:DISP", value)
-
-    @property
-    def statistics_mode(self) -> MeasureStatisticMode:
-        """Set or query the statistic mode."""
-        return MeasureStatisticMode(self._query(":STAT:MODE?"))
-
-    @statistics_mode.setter
-    def statistics_mode(self, value: MeasureStatisticMode = MeasureStatisticMode.Extremum):
-        self._write(":STAT:MODE %s" % (value.value))
-
-    def statistics_reset(self):
-        self._write(":STAT:RES")
-
-    def statistics_item_add(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
-        """Enable the statistic function of any waveform parameter of the specified source"""
-        assert not (source1 is None and source2 is not None)
-        assert item in (MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
-            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase) and source1 is not None
-
-        message = ":STAT:ITEM %s" % (item.value)
-        if source1 is not None:
-            message += ",%s" % (source1.value)
-        if source2 is not None:
-            message += ",%s" % (source2.value)
-
-        self._write(message)
-
-    def statistics_reset(self):
-        """Clear the history data and make statistic again."""
-        self._write(":STAT:RES")
-
-    def statistics_item_read(self, type: MeasureStatisticType, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
-        """Query the statistic function of any waveform parameter of the specified source"""
-        assert not (source1 is None and source2 is not None)
-        assert item in (MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
-            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase) and source2 is not None
-
-        message = ":STAT:ITEM? %s,%s" % (type.value, item.value)
-        if source1 is not None:
-            message += ",%s" % (source1.value)
-        if source2 is not None:
-            message += ",%s" % (source2.value)
-
-        return self._query_float(message)
+    @allmeasure_source.setter
+    def allmeasure_source(self, value: MeasureAllmeasureSource):
+        self._write(":AMS %s" % (value.to_string()))
 
     def item_add(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
         """Measure any waveform parameter of the specified source"""
@@ -2362,6 +2321,158 @@ class _Measure(_Scpihelper):
         assert item not in dualsource_measurements or (item in dualsource_measurements and source2 is not None)
 
         message = ":ITEM? %s" % (item.value)
+        if source1 is not None:
+            message += ",%s" % (source1.value)
+        if source2 is not None:
+            message += ",%s" % (source2.value)
+
+        return self._query_float(message)
+
+class MeasureSetupSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class _MeasureSetup(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MEAS:SET")
+
+    @property
+    def max(self) -> int:
+        """Set or query the upper limit of the threshold (expressed in the percentage of amplitude) 
+        in time, delay, and phase measurements."""
+        return self._query_int(":MAX?")
+
+    @max.setter
+    def max(self, value: int = 90):
+        assert value >= 7 and value <= 95
+        self._write(":MAX %u" % (value))
+
+    @property
+    def mid(self) -> int:
+        """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
+        in time, delay, and phase measurements."""
+        return self._query_int(":MID?")
+
+    @mid.setter
+    def mid(self, value: int = 50):
+        assert value >= 6 and value <= 94
+        self._write(":MID %u" % (value))
+
+    @property
+    def min(self) -> int:
+        """Set or query the middle point of the threshold (expressed in the percentage of amplitude) 
+        in time, delay, and phase measurements."""
+        return self._query_int(":MIN?")
+
+    @min.setter
+    def min(self, value: int = 10):
+        assert value >= 5 and value <= 93
+        self._write(":MIN %u" % (value))
+
+    @property
+    def phase_source_a(self) -> MeasureSetupSource:
+        """Set or query source A of Phase (rising) 1→2 and Phase (falling) 1→2 measurements."""
+        return MeasureSetupSource(self._query(":PSA?"))
+
+    @phase_source_a.setter
+    def phase_source_a(self, value: MeasureSetupSource):
+        self._write(":PSA %s" % (value.value))
+
+    @property
+    def phase_source_b(self) -> MeasureSetupSource:
+        """Set or query source B of Phase (rising) 1→2 and Phase (falling) 1→2 measurements."""
+        return MeasureSetupSource(self._query(":PSB?"))
+
+    @phase_source_b.setter
+    def phase_source_b(self, value: MeasureSetupSource):
+        self._write(":PSB %s" % (value.value))
+
+    @property
+    def delay_source_a(self) -> MeasureSetupSource:
+        """Set or query source A of Delay (rising) 1→2 and Delay (falling) 1→2 measurements."""
+        return MeasureSetupSource(self._query(":DSA?"))
+
+    @delay_source_a.setter
+    def delay_source_a(self, value: MeasureSetupSource):
+        self._write(":DSA %s" % (value.value))
+
+    @property
+    def delay_source_b(self) -> MeasureSetupSource:
+        """Set or query source B of Delay (rising) 1→2 and Delay (falling) 1→2 measurements."""
+        return MeasureSetupSource(self._query(":DSB?"))
+
+    @delay_source_b.setter
+    def delay_source_b(self, value: MeasureSetupSource):
+        self._write(":DSB %s" % (value.value))
+
+class _MeasureStatistics(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":MEAS:STAT")
+
+    @property
+    def display(self) -> bool:
+        """Enable or disable the statistic function, or query the status of the statistic function."""
+        return self._query_bool(":DISP?")
+    
+    @display.setter
+    def display(self, value: bool):
+        self._write_bool(":DISP", value)
+
+    @property
+    def mode(self) -> MeasureStatisticMode:
+        """Set or query the statistic mode."""
+        return MeasureStatisticMode(self._query(":MODE?"))
+
+    @mode.setter
+    def mode(self, value: MeasureStatisticMode = MeasureStatisticMode.Extremum):
+        self._write(":MODE %s" % (value.value))
+
+    def reset(self):
+        self._write(":RES")
+
+    def item_add(self, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
+        """Enable the statistic function of any waveform parameter of the specified source"""
+        assert not (source1 is None and source2 is not None)
+        assert item in (MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
+            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase) and source1 is not None
+
+        message = ":ITEM %s" % (item.value)
+        if source1 is not None:
+            message += ",%s" % (source1.value)
+        if source2 is not None:
+            message += ",%s" % (source2.value)
+
+        self._write(message)
+
+    def reset(self):
+        """Clear the history data and make statistic again."""
+        self._write(":RES")
+
+    def item_read(self, type: MeasureStatisticType, item: MeasureItem, source1: MeasureSource, source2: MeasureSource = None):
+        """Query the statistic function of any waveform parameter of the specified source"""
+        assert not (source1 is None and source2 is not None)
+        assert item in (MeasureItem.RisingEdgeDelay, MeasureItem.FallingEdgeDelay, 
+            MeasureItem.RisingEdgePhase, MeasureItem.FallingEdgePhase) and source2 is not None
+
+        message = ":ITEM? %s,%s" % (type.value, item.value)
         if source1 is not None:
             message += ",%s" % (source1.value)
         if source2 is not None:
@@ -2483,7 +2594,122 @@ class _Reference(_Scpihelper):
 
 #TODO: Source
 #TODO: Storage
-#TODO: System
+
+class SystemLanguage(Enum):
+    SimplifiedChinese = "SCH"
+    TraditionalChinese = "TCH"
+    English = "ENGL"
+    Portuguese = "PORT"
+    German = "GERM"
+    Polish = "POL"
+    Korean = "KOR"
+    Japanese = "JAPA"
+    French = "FREN"
+    Russian = "RUSS"
+
+class SystemPoweronsettings(Enum):
+    Last = "LAT"
+    Default = "DEF"
+
+class _System(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":SYST")
+
+    @property
+    def autoscale_enable(self) -> bool:
+        """Enable or disable the AUTO key on the front panel, or query the status of the AUTO key."""
+        return self._query_bool(":AUT?")
+    
+    @autoscale_enable.setter
+    def autoscale_enable(self, value: bool):
+        self._write_bool(":AUT", value)
+
+    @property
+    def beeper_enable(self) -> bool:
+        """Enable or disable the beeper, or query the status of the beeper."""
+        return self._query_bool(":BEEP?")
+    
+    @beeper_enable.setter
+    def beeper_enable(self, value: bool):
+        self._write_bool(":BEEP", value)
+
+    @property
+    def error(self) -> str:
+        """Query and delete the last system error message."""
+        return self._query(":ERR?")
+
+    @property
+    def error_next(self) -> str:
+        """Query and delete the next last system error message."""
+        return self._query(":ERR:NEXT?")
+
+    @property
+    def horizontal_grid(self) -> int:
+        """Query the number of grids in the horizontal direction of the instrument screen."""
+        return self._query_int(":GAM?")
+
+    @property
+    def language(self) -> SystemLanguage:
+        """Set or query the system language."""
+        return SystemLanguage(self._query(":LANG?"))
+
+    @language.setter
+    def language(self, value: SystemLanguage):
+        self._write(":LANG %s" % (value.value))
+
+    @property
+    def lock(self) -> bool:
+        """Enable or disable the keyboard lock function, or query the status of the keyboard lock function."""
+        return self._query_bool(":LOCK?")
+    
+    @lock.setter
+    def lock(self, value: bool):
+        self._write_bool(":LOCK", value)
+
+    @property
+    def power_on_settings(self) -> SystemPoweronsettings:
+        """Set or query the system configuration to be recalled when the oscilloscope is powered on again after power-off."""
+        return SystemPoweronsettings(self._query(":PON?"))
+
+    @power_on_settings.setter
+    def power_on_settings(self, value: SystemPoweronsettings):
+        self._write(":PON %s" % (value.value))
+
+    def option_install(self, option: str):
+        """Install a option.
+
+        Args:
+            option (str): license code for the option
+        """
+        assert len(option) == 28
+        self._write("OPT:INST %s" % (option))
+
+    def options_uninstall(self, confirm: bool = False):
+        """Unionstall the options installed.
+
+        Args:
+            confirm (bool, optional): confirm that you want to do this. Defaults to False.
+        """
+        assert confirm is True
+        self._write("OPT:UNINST")
+
+    @property
+    def analog_channsels(self) -> int:
+        """Query the number of analog channels of the instrument.
+        This always returns 4"""
+        return self._query_int(":RAM?")
+
+    @property
+    def setup(self) -> bytearray:
+        """Import the setting parameters of the oscilloscope to restore the oscilloscope to the specified setting."""
+        return bytearray(self.resource.query_binary_values("%s:SET?" % (self.message_prefix), "B"))
+
+    @setup.setter
+    def setup(self, value: bytearray):
+        #FIXME: this doesn't work
+        raise Exception("this does not compute")
+        self._write(":SET #9%9u%s" % (len(value), value))
+
 #TODO: Trace
 
 class TimebaseMode(Enum):
