@@ -2702,13 +2702,11 @@ class _System(_Scpihelper):
     @property
     def setup(self) -> bytearray:
         """Import the setting parameters of the oscilloscope to restore the oscilloscope to the specified setting."""
-        return bytearray(self.resource.query_binary_values("%s:SET?" % (self.message_prefix), "B"))
+        return self.resource.query_binary_values("%s:SET?" % (self.message_prefix), "B", container=bytearray)
 
     @setup.setter
     def setup(self, value: bytearray):
-        #FIXME: this doesn't work
-        raise Exception("this does not compute")
-        self._write(":SET #9%9u%s" % (len(value), value))
+        self.resource.write_binary_values('%s:SET ' % (self.message_prefix), value, datatype="s")
 
 #TODO: Trace
 
@@ -2820,6 +2818,14 @@ class _Trigger(_Scpihelper):
 
         self.edge = _TriggerEdge(scope)
         self.pulse = _TriggerPulse(scope)
+        self.slope = _TriggerSlope(scope)
+        self.video = _TriggerVideo(scope)
+        self.timeout = _TriggerTimeout(scope)
+        self.runt = _TriggerRunt(scope)
+        self.window = _TriggerWindow(scope)
+        self.delay = _TriggerDelay(scope)
+        self.setuphold = _TriggerSetuphold(scope)
+        self.nthedge = _TriggerNthedge(scope)
 
     @property
     def mode(self) -> TriggerMode:
@@ -3042,16 +3048,687 @@ class _TriggerPulse(_Scpihelper):
         assert True
         self._write_float(":LEV", value)
 
-#TODO: :TRIGger:SLOPe
-#TODO: :TRIGger:VIDeo
+class TriggerSlopeSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerSlopeWhen(Enum):
+    PositiveGreater = "PGR"
+    PositiveLess = "PLES"
+    PositivePulseWindow = "PGL"
+
+    NegativeGreater = "NGR"
+    NegativeLess = "NLES"
+    NegativePulseWindow = "NGL"
+
+class TriggerSlopeWindow(Enum):
+    UpperLimit = "TA"
+    LowerLimit = "TB"
+    BothLimits = "TAB"
+
+class _TriggerSlope(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:SLOP")
+
+    @property
+    def source(self) -> TriggerSlopeSource:
+        """Set or query the trigger source in slope trigger."""
+        return TriggerSlopeSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerSlopeSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def when(self) -> TriggerSlopeWhen:
+        """Set or query the trigger condition in slope trigger."""
+        return TriggerSlopeWhen(self._query(":WHEN?"))
+
+    @when.setter
+    def when(self, value: TriggerSlopeWhen):
+        self._write(":WHEN %s" % (value.value))
+
+    @property
+    def time(self) -> float:
+        """Set or query the time value in slope trigger.
+        The default unit is s."""
+        return self._query_float(":TIME?")
+
+    @time.setter
+    def time(self, value: float):
+        assert value >= 8e-9 and value <= 10
+        self._write_float(":TIME", value)
+
+    @property
+    def time_upper_limit(self) -> float:
+        """Set or query the upper limit of the time in slope trigger. 
+        The default unit is s."""
+        return self._query_float(":TUPP?")
+
+    @time_upper_limit.setter
+    def time_upper_limit(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":TUPP", value)
+
+    @property
+    def time_lower_limit(self) -> float:
+        """Set or query the lower limit of the time in slope trigger. 
+        The default unit is s."""
+        return self._query_float(":TLOW?")
+
+    @time_lower_limit.setter
+    def time_lower_limit(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":TLOW", value)
+
+    @property
+    def window(self) -> TriggerSlopeWindow:
+        """Set or query the vertical window type in slope trigger."""
+        return TriggerSlopeWindow(self._query(":WIND?"))
+
+    @window.setter
+    def window(self, value: TriggerSlopeWindow):
+        self._write(":WIND %s" % (value.value))
+
+    @property
+    def upper_limit(self) -> float:
+        """Set or query the upper limit of the trigger level in slope trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":ALEV?")
+
+    @upper_limit.setter
+    def upper_limit(self, value: float):
+        self._write_float(":ALEV", value)
+    
+    @property
+    def lower_limit(self) -> float:
+        """Set or query the lower limit of the trigger level in slope trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":BLEV?")
+
+    @lower_limit.setter
+    def lower_limit(self, value: float):
+        self._write_float(":BLEV", value)
+
+class TriggerVideoSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerVideoPolarity(Enum):
+    Positive = "POS"
+    Negative = "NEG"
+
+class TriggerVideoMode(Enum):
+    OddField = "ODD"
+    EvenField = "EVEN"
+    Line = "LINE"
+    HorizontalSync = "ALIN"
+
+class TriggerVideoStandard(Enum):
+    PAL_Secam = "PALS"
+    NTSC = "NTSC"
+    SD_480P = "480P"
+    SD_567P = "576P"
+
+class _TriggerVideo(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:VID")
+
+    @property
+    def source(self) -> TriggerVideoSource:
+        """Select or query the trigger source in video trigger."""
+        return TriggerVideoSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerVideoSource):
+        self._write(":SOUR %s" % (value.value))
+    
+    @property
+    def polarity(self) -> Enum:
+        """Select or query the video polarity in video trigger."""
+        return Enum(self._query(":POL?"))
+
+    @polarity.setter
+    def polarity(self, value: Enum):
+        self._write(":POL %s" % (value.value))
+
+    @property
+    def mode(self) -> TriggerVideoMode:
+        """Set or query the sync type in video trigger."""
+        return TriggerVideoMode(self._query(":MODE?"))
+
+    @mode.setter
+    def mode(self, value: TriggerVideoMode):
+        self._write(":MODE %s" % (value.value))
+    
+    @property
+    def line(self) -> int:
+        """Set or query the line number when the sync type in video trigger is LINE."""
+        return self._query_int(":LINE?")
+
+    @line.setter
+    def line(self, value: int):
+        assert value >= 1 and value <= 625
+        self._write_int(":LINE", value)
+
+    @property
+    def prop_enum(self) -> TriggerVideoStandard:
+        """Set or query the video standard in video trigger."""
+        return TriggerVideoStandard(self._query(":STAN?"))
+
+    @prop_enum.setter
+    def prop_enum(self, value: TriggerVideoStandard):
+        self._write(":STAN %s" % (value.value))
+
+    @property
+    def level(self) -> float:
+        """Set or query the trigger level in video trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":LEV?")
+
+    @level.setter
+    def level(self, value: float):
+        assert True
+        self._write_float(":LEV", value)
+
 #TODO: :TRIGger:PATTern
 #TODO: :TRIGger:DURATion
-#TODO: :TRIGger:TIMeout
-#TODO: :TRIGger:RUNT
-#TODO: :TRIGger:WINDows
-#TODO: :TRIGger:DELay 
-#TODO: :TRIGger:SHOLd 
-#TODO: :TRIGger:NEDGe 
+
+class TriggerTimeoutSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerTimeoutSlope(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+    Any = "RFAL"
+
+class _TriggerTimeout(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:TIM")
+    
+    @property
+    def source(self) -> TriggerTimeoutSource:
+        """Set or query the trigger source in timeout trigger."""
+        return TriggerTimeoutSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerTimeoutSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def slope(self) -> Enum:
+        """Set or query the edge type in timeout trigger."""
+        return Enum(self._query(":SLOP?"))
+
+    @slope.setter
+    def slope(self, value: Enum):
+        self._write(":SLOP %s" % (value.value))
+
+    @property
+    def time(self) -> float:
+        """Set or query the timeout time in timeout trigger. The default unit is s."""
+        return self._query_float(":TIM?")
+
+    @time.setter
+    def time(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":TIM", value)
+
+class TriggerRuntSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerRuntPolarity(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+
+class TriggerRuntWhen(Enum):
+    Disabled = "NONE"
+    Greater = "GRE"
+    Less = "LESS"
+    GreaterAndLess = "GLES"
+
+class _TriggerRunt(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:RUNT")
+
+    @property
+    def source(self) -> TriggerRuntSource:
+        """Set or query the trigger source in runt trigger."""
+        return TriggerRuntSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerRuntSource):
+        self._write(":SOUR %s" % (value.value))
+
+
+    @property
+    def polarity(self) -> TriggerRuntPolarity:
+        """Set or query the pulse polarity in runt trigger."""
+        return TriggerRuntPolarity(self._query(":POL?"))
+
+    @polarity.setter
+    def polarity(self, value: TriggerRuntPolarity):
+        self._write(":POL %s" % (value.value))
+
+    @property
+    def when(self) -> Enum:
+        """Set or query the qualifier in runt trigger."""
+        return Enum(self._query(":WHEN?"))
+
+    @when.setter
+    def when(self, value: Enum):
+        self._write(":WHEN %s" % (value.value))
+
+    @property
+    def time_upper_limit(self) -> float:
+        """Set or query the pulse width upper limit in runt trigger. 
+        The default unit is s."""
+        return self._query_float(":WUPP?")
+
+    @time_upper_limit.setter
+    def time_upper_limit(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":WUPP", value)
+
+    @property
+    def time_lower_limit(self) -> float:
+        """Set or query the pulse width lower limit in runt trigger. 
+        The default unit is s."""
+        return self._query_float(":WLOW?")
+
+    @time_lower_limit.setter
+    def time_lower_limit(self, value: float):
+        assert value >= 8e-9 and value <= 9.99
+        self._write_float(":WLOW", value)
+
+    @property
+    def level_upper_limit(self) -> float:
+        """Set or query the trigger level upper limit in runt trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":ALEV?")
+
+    @level_upper_limit.setter
+    def level_upper_limit(self, value: float):
+        assert True
+        self._write_float(":ALEV", value)
+
+    @property
+    def level_lower_limit(self) -> float:
+        """Set or query the trigger level lower limit in runt trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":BLEV?")
+
+    @level_lower_limit.setter
+    def level_lower_limit(self, value: float):
+        assert True
+        self._write_float(":BLEV", value)
+
+class TriggerWindowSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerWindowSlope(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+    Any = "RFAL"
+
+class TriggerWindowPosition(Enum):
+    Exit = "EXIT"
+    Enter = "ENTER"
+    Time = "TIM"
+
+class _TriggerWindow(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:WIND")
+
+    @property
+    def source(self) -> TriggerWindowSource:
+        """Set or query the trigger source in windows trigger."""
+        return TriggerWindowSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerWindowSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def slope(self) -> TriggerWindowSlope:
+        """Set or query the windows type in windows trigger."""
+        return TriggerWindowSlope(self._query(":SLOP?"))
+
+    @slope.setter
+    def slope(self, value: TriggerWindowSlope):
+        self._write(":SLOP %s" % (value.value))
+
+    @property
+    def position(self) -> TriggerWindowPosition:
+        """Set or query the trigger position in windows trigger.
+        Exit: trigger when the input signal exits the specified trigger level range.
+        Enter: trigger when the trigger signal enters the specified trigger level range. 
+        Time: used to specify the hold time of the input signal after it enters the specified trigger
+            level range. The instrument triggers when the accumulated hold time equals the windows time.
+        """
+        return TriggerWindowPosition(self._query(":POS?"))
+
+    @position.setter
+    def position(self, value: TriggerWindowPosition):
+        self._write(":POS %s" % (value.value))
+
+    @property
+    def time(self) -> float:
+        """Set or query the hold time in windows trigger."""
+        return self._query_float(":TIM?")
+
+    @time.setter
+    def time(self, value: float):
+        assert value >= 8e-9 and value <= 10
+        self._write_float(":TIM", value)
+
+    @property
+    def level_upper_limit(self) -> float:
+        """Set or query the trigger level upper limit in runt trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":ALEV?")
+
+    @level_upper_limit.setter
+    def level_upper_limit(self, value: float):
+        assert True
+        self._write_float(":ALEV", value)
+
+    @property
+    def level_lower_limit(self) -> float:
+        """Set or query the trigger level lower limit in runt trigger. 
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":BLEV?")
+
+    @level_lower_limit.setter
+    def level_lower_limit(self, value: float):
+        assert True
+        self._write_float(":BLEV", value)
+
+class TriggerDelaySource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerDelaySlope(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+
+class TriggerDelayType(Enum):
+    Greater = "GRE"
+    Less = "LESS"
+    InWindow = "GLES"
+    OutWindow = "GOUT"
+
+class _TriggerDelay(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:DEL")
+
+    @property
+    def source_a(self) -> TriggerDelaySource:
+        """Set or query the trigger source A in delay trigger."""
+        return TriggerDelaySource(self._query(":SA?"))
+
+    @source_a.setter
+    def source_a(self, value: TriggerDelaySource):
+        self._write(":SA %s" % (value.value))
+
+    @property
+    def slope_a(self) -> TriggerDelaySlope:
+        """Set or query the edge type of edge A in delay trigger."""
+        return TriggerDelaySlope(self._query(":SLOPA?"))
+
+    @slope_a.setter
+    def slope_a(self, value: TriggerDelaySlope):
+        self._write(":SLOPA %s" % (value.value))
+
+    @property
+    def source_b(self) -> TriggerDelaySource:
+        """Set or query the trigger source B in delay trigger."""
+        return TriggerDelaySource(self._query(":SB?"))
+
+    @source_a.setter
+    def source_b(self, value: TriggerDelaySource):
+        self._write(":SB %s" % (value.value))
+
+    @property
+    def slope_b(self) -> TriggerDelaySlope:
+        """Set or query the edge type of edge B in delay trigger."""
+        return TriggerDelaySlope(self._query(":SLOPB?"))
+
+    @slope_a.setter
+    def slope_b(self, value: TriggerDelaySlope):
+        self._write(":SLOPB %s" % (value.value))
+
+    @property
+    def type(self) -> TriggerDelayType:
+        """Set or query the delay type in delay trigger."""
+        return TriggerDelayType(self._query(":TYP?"))
+
+    @type.setter
+    def type(self, value: TriggerDelayType):
+        self._write(":TYP %s" % (value.value))
+
+    @property
+    def time_upper_limit(self) -> float:
+        """Set or query the upper limit of the delay time in delay trigger. 
+        The default unit is s."""
+        return self._query_float(":TUPP?")
+
+    @time_upper_limit.setter
+    def time_upper_limit(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":TUPP", value)
+
+    @property
+    def time_lower_limit(self) -> float:
+        """Set or query the lower limit of the delay time in delay trigger. 
+        The default unit is s."""
+        return self._query_float(":TLOW?")
+
+    @time_lower_limit.setter
+    def time_lower_limit(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":TLOW", value)
+
+class TriggerSetupholdSource(Enum):
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerSetupholdSlope(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+
+class TriggerSetupholdPattern(Enum):
+    High = "H"
+    Low = "L"
+
+class TriggerSetupholdType(Enum):
+    Setup = "SET"
+    Hold = "HOL"
+    SetupHold = "SETHOL"
+
+class _TriggerSetuphold(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:SHOL")
+
+    @property
+    def data_source(self) -> TriggerSetupholdSource:
+        """Set or query the data source in setup/hold trigger."""
+        return TriggerSetupholdSource(self._query(":DS?"))
+
+    @data_source.setter
+    def data_source(self, value: TriggerSetupholdSource):
+        self._write(":DS %s" % (value.value))
+
+    @property
+    def clock_source(self) -> TriggerSetupholdSource:
+        """Set or query the clock source in setup/hold trigger."""
+        return TriggerSetupholdSource(self._query(":CS?"))
+
+    @clock_source.setter
+    def clock_source(self, value: TriggerSetupholdSource):
+        self._write(":CS %s" % (value.value))
+
+    @property
+    def slope(self) -> TriggerSetupholdSlope:
+        """Set or query the edge type in setup/hold trigger."""
+        return TriggerSetupholdSlope(self._query(":SLOP?"))
+
+    @slope.setter
+    def prop_enum(self, value: TriggerSetupholdSlope):
+        self._write(":SLOP %s" % (value.value))
+
+    @property
+    def pattern(self) -> TriggerSetupholdPattern:
+        """Set or query the data type in setup/hold trigger."""
+        return TriggerSetupholdPattern(self._query(":PATT?"))
+
+    @pattern.setter
+    def pattern(self, value: TriggerSetupholdPattern):
+        self._write(":PATT %s" % (value.value))
+
+    @property
+    def type(self) -> TriggerSetupholdType:
+        """Set or query the setup type in setup/hold trigger."""
+        return TriggerSetupholdType(self._query(":TYP?"))
+
+    @type.setter
+    def type(self, value: TriggerSetupholdType):
+        self._write(":TYP %s" % (value.value))
+
+    @property
+    def setup_time(self) -> float:
+        """Set or query the setup time in setup/hold trigger.
+        The default unit is s."""
+        return self._query_float(":STIM?")
+
+    @setup_time.setter
+    def setup_time(self, value: float):
+        assert value >= 8e-9 and value <= 1
+        self._write_float(":STIM", value)
+
+    @property
+    def hold_time(self) -> float:
+        """Set or query the hold time in setup/hold trigger.
+        The default unit is s."""
+        return self._query_float(":HTIM?")
+
+    @hold_time.setter
+    def hold_time(self, value: float):
+        assert value >= 8e-9 and value <= 1
+        self._write_float(":HTIM", value)
+
+class TriggerNthedgeSource(Enum):
+    Digital0 = "D0"
+    Digital1 = "D1"
+    Digital2 = "D2"
+    Digital3 = "D3"
+    Digital4 = "D4"
+    Digital5 = "D5"
+    Digital6 = "D6"
+    Digital7 = "D7"
+    Digital8 = "D8"
+    Digital9 = "D9"
+    Digital10 = "D10"
+    Digital11 = "D11"
+    Digital12 = "D12"
+    Digital13 = "D13"
+    Digital14 = "D14"
+    Digital15 = "D15"
+    Channel1 = "CHAN1"
+    Channel2 = "CHAN2"
+    Channel3 = "CHAN3"
+    Channel4 = "CHAN4"
+
+class TriggerNthedgeSlope(Enum):
+    Rising = "POS"
+    Falling = "NEG"
+
+class _TriggerNthedge(_Scpihelper):
+    def __init__(self, scope: DS1000z):
+        super().__init__(scope, ":TRIG:NEDG")
+
+    @property
+    def source(self) -> TriggerNthedgeSource:
+        """Set or query the trigger source in Nth edge trigger."""
+        return TriggerNthedgeSource(self._query(":SOUR?"))
+
+    @source.setter
+    def source(self, value: TriggerNthedgeSource):
+        self._write(":SOUR %s" % (value.value))
+
+    @property
+    def slope(self) -> TriggerNthedgeSlope:
+        """Set or query the edge type in Nth edge trigger."""
+        return TriggerNthedgeSlope(self._query(":SLOP?"))
+
+    @slope.setter
+    def slope(self, value: TriggerNthedgeSlope):
+        self._write(":SLOP %s" % (value.value))
+
+    @property
+    def idle_time(self) -> float:
+        """Set or query the idle time in Nth edge trigger.
+        The default unit is s."""
+        return self._query_float(":IDLE?")
+
+    @idle_time.setter
+    def idle_time(self, value: float):
+        assert value >= 16e-9 and value <= 10
+        self._write_float(":IDLE", value)
+    
+    @property
+    def edges(self) -> int:
+        """Set or query the number of edges in Nth edge trigger."""
+        return self._query_int(":EDGE?")
+
+    @edges.setter
+    def edges(self, value: int):
+        assert value >= 1 and value <= 65535
+        self._write_int(":EDGE", value)
+
+    @property
+    def level(self) -> float:
+        """Set or query the trigger level in Nth edge trigger.
+        The unit is the same as the current amplitude unit."""
+        return self._query_float(":LEV?")
+
+    @level.setter
+    def level(self, value: float):
+        self._write_float(":LEV", value)
+
 #TODO: :TRIGger:RS232 
 #TODO: :TRIGger:IIC 
 #TODO: :TRIGger:SPI 
