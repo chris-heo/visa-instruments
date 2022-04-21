@@ -1513,7 +1513,7 @@ class _Display(_Scpihelper):
         """
         cmd = "%s:DATA? %u,%u,%s" % (
             self.message_prefix,
-            1 if color else 0,
+            0 if color else 1,
             1 if invert else 0,
             format.value
         )
