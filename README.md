@@ -1,4 +1,4 @@
-# Yet another DS1000 Python implementation
+# Yet another Rigol DS1000 Python implementation
 Relevant xkcd: https://xkcd.com/927/
 
 There are already plente of Python implementations for the Rigol DS1000-series. And yet, none of them fulfilled my needs to control the scope. So I sat down and wrote my own.
