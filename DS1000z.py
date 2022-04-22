@@ -277,16 +277,16 @@ class _Calibrate(_Scpihelper):
         """Exit the self-calibration at any time."""
         self._write(":QUIT")
 
-class BandwidthLimit(Enum):
+class ChannelBandwidthLimit(Enum):
     Off = "OFF"
     Limit_20M = "20M"
 
-class Coupling(Enum):
+class ChannelCoupling(Enum):
     AC = "AC"
     DC = "DC"
     GND = "GND"
 
-class VerticalUnit(Enum):
+class ChannelVerticalUnit(Enum):
     Voltage = "VOLT"
     Watt = "WATT"
     Ampere = "AMP"
@@ -299,21 +299,21 @@ class _Channel(_Scpihelper):
         self.channel = channel
 
     @property
-    def bandwidth_limit(self) -> BandwidthLimit:
+    def bandwidth_limit(self) -> ChannelBandwidthLimit:
         """Set or query the bandwidth limit parameter of the specified channel."""
-        return BandwidthLimit(self._query(":BWL?"))
+        return ChannelBandwidthLimit(self._query(":BWL?"))
     
     @bandwidth_limit.setter
-    def bandwidth_limit(self, value: BandwidthLimit):
+    def bandwidth_limit(self, value: ChannelBandwidthLimit):
         self._write(":BWL %s" % (value.value))
     
     @property
-    def coupling(self) -> Coupling:
+    def coupling(self) -> ChannelCoupling:
         """Set or query the coupling mode of the specified channel."""
-        return Coupling(self._query(":COUP?"))
+        return ChannelCoupling(self._query(":COUP?"))
 
     @coupling.setter
-    def coupling(self, value: Coupling):
+    def coupling(self, value: ChannelCoupling):
         self._write(":COUP %s" % (value.value))
     
     @property
@@ -401,12 +401,12 @@ class _Channel(_Scpihelper):
         self._write_float(":PROB", value)
 
     @property
-    def vertical_unit(self) -> VerticalUnit:
+    def vertical_unit(self) -> ChannelVerticalUnit:
         """Set or query the amplitude display unit of the specified channel."""
-        return VerticalUnit(self._query(":UNIT?"))
+        return ChannelVerticalUnit(self._query(":UNIT?"))
 
     @vertical_unit.setter
-    def vertical_unit(self, value: VerticalUnit):
+    def vertical_unit(self, value: ChannelVerticalUnit):
         self._write(":UNIT %s" % (value.value))
 
     @property
@@ -1479,7 +1479,7 @@ class DisplayPersistence(Enum):
 
 class DisplayGrid(Enum):
     Full = "FULL"
-    Half = "GALF"
+    Half = "HALF"
     Off = "NONE"
 
 class DisplayDataFormat(Enum):
@@ -2701,12 +2701,26 @@ class _System(_Scpihelper):
 
     @property
     def setup(self) -> bytearray:
-        """Import the setting parameters of the oscilloscope to restore the oscilloscope to the specified setting."""
+        """Import or export the setting parameters of the oscilloscope to restore the oscilloscope to the specified setting."""
         return self.resource.query_binary_values("%s:SET?" % (self.message_prefix), "B", container=bytearray)
 
     @setup.setter
     def setup(self, value: bytearray):
         self.resource.write_binary_values('%s:SET ' % (self.message_prefix), value, datatype="s")
+
+    def setup_save(self, filename: str):
+        """Exports the setting parameters of the oscilloscope to a file
+
+        Args:
+            filename (str): filename to save the settings to
+        """
+        data = self.resource.query_binary_values("%s:SET?" % (self.message_prefix), "B", container=bytearray)
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
+        with open(filename, 'wb') as fs:
+            fs.write(data)
 
 #TODO: Trace
 
